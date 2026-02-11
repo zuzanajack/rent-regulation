@@ -17,6 +17,7 @@ import {
   recomputeTotalsWithExclusions,
 } from './rentRegulationService';
 import type {
+  PublicCharge,
   RegulationRun,
   RegulationUnitSetting,
   RegulationBookingSetting,
@@ -24,6 +25,21 @@ import type {
 } from './models';
 
 type Tab = 'buildings' | 'regulation' | 'invoices' | 'notifications' | 'templates';
+
+type DistributionRow = {
+  id: string;
+  bookingId: string;
+  tenantName: string;
+  unitName: string;
+  areaSqm: number | string;
+  leaseStart?: string;
+  leaseEnd?: string;
+  currentAmount: number;
+  adjustmentAmount: number;
+  newAmount: number;
+  description: string;
+  recurring: boolean;
+};
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('buildings');
@@ -45,8 +61,152 @@ function App() {
   const [chargeYearSort, setChargeYearSort] = useState<'asc' | 'desc'>('asc');
   const [periodSort, setPeriodSort] = useState<'asc' | 'desc'>('desc');
 
-  const skuOptions = ['1001', '1002', '1003', '1004', '1005', '1006', '1007'];
-  const [selectedSku, setSelectedSku] = useState<string>(skuOptions[0]);
+  const skuOptions = [
+    { id: '2001', label: '2001 – Base rent' },
+    { id: '2002', label: '2002 – Utilities' },
+    { id: '2003', label: '2003 – Deposit' },
+    { id: '2004', label: '2004 – Prepaid rent' },
+    { id: '2005', label: '2005 – Parking' },
+    { id: '2006', label: '2006 – Storage' },
+    { id: '2007', label: '2007 – Service charges' },
+  ];
+  const expenseSkuOptions = [
+    { id: '1001', label: '1001 – Property taxes' },
+    { id: '1002', label: '1002 – Garbage collection' },
+    { id: '1003', label: '1003 – Water & sewage' },
+    { id: '1004', label: '1004 – Heating & energy' },
+    { id: '1005', label: '1005 – Building insurance' },
+    { id: '1006', label: '1006 – Common area maintenance' },
+    { id: '1007', label: '1007 – Other building expenses' },
+  ];
+  const [selectedSku, setSelectedSku] = useState<string>(skuOptions[0].id);
+
+  // Modal state for creating/editing public expenses
+  const [showExpenseModal, setShowExpenseModal] = useState(false);
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+  const [expenseForm, setExpenseForm] = useState<{
+    id?: string;
+    label: string;
+    sku: string;
+    date: string;
+    amount: number | '';
+    vat: number | '';
+  }>({
+    label: '',
+    sku: expenseSkuOptions[0].id,
+    date: new Date().toISOString().slice(0, 10),
+    amount: '',
+    vat: '',
+  });
+
+  const openNewExpenseModal = () => {
+    if (regulationLocked) return;
+    setEditingExpenseId(null);
+    setExpenseForm({
+      label: '',
+      sku: expenseSkuOptions[0].id,
+      date: new Date().toISOString().slice(0, 10),
+      amount: '',
+      vat: '',
+    });
+    setShowExpenseModal(true);
+  };
+
+  const openEditExpenseModal = (id: string) => {
+    if (regulationLocked) return;
+    const charge = charges.find((c) => c.id === id);
+    if (!charge) return;
+    // Derive representative date from nextPeriodFrom if available, else prevPeriodFrom, else today
+    const derivedDate =
+      charge.date ||
+      charge.nextPeriodFrom ||
+      charge.prevPeriodFrom ||
+      new Date().toISOString().slice(0, 10);
+    setEditingExpenseId(id);
+    setExpenseForm({
+      id: charge.id,
+      label: charge.label,
+      sku: charge.sku ?? expenseSkuOptions[0].id,
+      date: derivedDate.slice(0, 10),
+      amount: charge.nextAmount || charge.prevAmount || '',
+      vat: charge.vat ?? '',
+    });
+    setShowExpenseModal(true);
+  };
+
+  const closeExpenseModal = () => {
+    setShowExpenseModal(false);
+    setEditingExpenseId(null);
+  };
+
+  const handleExpenseFormChange = <K extends keyof typeof expenseForm>(
+    field: K,
+    value: (typeof expenseForm)[K],
+  ) => {
+    setExpenseForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleSaveExpense = () => {
+    if (regulationLocked) return;
+    const { label, sku, date, amount, vat } = expenseForm;
+    if (!label || !sku || !date || amount === '' || Number.isNaN(Number(amount))) {
+      // Basic inline validation – could be improved with messages
+      return;
+    }
+    const numericAmount = Number(amount);
+    const numericVat =
+      vat === '' || Number.isNaN(Number(vat)) ? undefined : Number(vat);
+
+    const year = new Date(date).getFullYear();
+    const from = `${year}-01-01`;
+    const to = `${year}-12-31`;
+
+    if (editingExpenseId == null) {
+      const newId = `pc-${Date.now()}`;
+      const newCharge: PublicCharge = {
+        id: newId,
+        buildingId: building.id,
+        label,
+        sku,
+        date,
+        vat: numericVat,
+        periodType: 'year',
+        prevPeriodFrom: from,
+        prevPeriodTo: to,
+        prevAmount: 0,
+        nextPeriodFrom: from,
+        nextPeriodTo: to,
+        nextAmount: numericAmount,
+      };
+      setCharges((prev) => [...prev, newCharge]);
+    } else {
+      setCharges((prev) =>
+        prev.map((c) =>
+          c.id === editingExpenseId
+            ? {
+                ...c,
+                label,
+                sku,
+                date,
+                vat: numericVat,
+                nextPeriodFrom: from,
+                nextPeriodTo: to,
+                nextAmount: numericAmount,
+              }
+            : c,
+        ),
+      );
+    }
+    closeExpenseModal();
+  };
+
+  const handleDeleteExpense = (id: string) => {
+    if (regulationLocked) return;
+    setCharges((prev) => prev.filter((c) => c.id !== id));
+    if (editingExpenseId === id) {
+      closeExpenseModal();
+    }
+  };
 
   const invoicingEntities = [
     'Nordic Homes A/S',
@@ -93,12 +253,22 @@ function App() {
       charges
         .filter((c) => c.buildingId === building.id)
         .forEach((charge) => {
+          const baseYearFromDate = charge.date
+            ? new Date(charge.date).getFullYear()
+            : undefined;
+
           const yearPrev =
-            charge.prevPeriodFrom &&
-            charge.prevPeriodFrom.length >= 4
+            baseYearFromDate !== undefined
+              ? baseYearFromDate - 1
+              : charge.prevPeriodFrom &&
+                charge.prevPeriodFrom.length >= 4
               ? Number(charge.prevPeriodFrom.slice(0, 4))
               : NaN;
-          if (Number.isFinite(yearPrev) && yearPrev > 0) {
+          if (
+            Number.isFinite(yearPrev) &&
+            yearPrev > 0 &&
+            (charge.prevAmount ?? 0) !== 0
+          ) {
             rows.push({
               id: `${charge.id}-prev`,
               chargeId: charge.id,
@@ -110,8 +280,10 @@ function App() {
           }
 
           const yearNext =
-            charge.nextPeriodFrom &&
-            charge.nextPeriodFrom.length >= 4
+            baseYearFromDate !== undefined
+              ? baseYearFromDate
+              : charge.nextPeriodFrom &&
+                charge.nextPeriodFrom.length >= 4
               ? Number(charge.nextPeriodFrom.slice(0, 4))
               : NaN;
           if (Number.isFinite(yearNext) && yearNext > 0) {
@@ -138,13 +310,77 @@ function App() {
     [charges, building.id],
   );
 
-  const sortedChargeRows = useMemo(
-    () =>
-      [...buildingChargeRows.rows].sort((a, b) =>
-        chargeYearSort === 'asc' ? a.year - b.year : b.year - a.year,
-      ),
-    [buildingChargeRows.rows, chargeYearSort],
-  );
+  const sortedChargeRows = useMemo(() => {
+    const { rows, globalMaxYear } = buildingChargeRows;
+    if (globalMaxYear === undefined) return [];
+    const visible = rows.filter((r) => r.year === globalMaxYear);
+    return visible.sort((a, b) =>
+      chargeYearSort === 'asc' ? a.year - b.year : b.year - a.year,
+    );
+  }, [buildingChargeRows, chargeYearSort]);
+
+  type SkuYearSummary = {
+    sku: string;
+    labels: string[];
+    prevYearAmount: number;
+    nextYearAmount: number;
+    diff: number;
+  };
+
+  const skuSummaries: {
+    rows: SkuYearSummary[];
+    totalPrev: number;
+    totalNext: number;
+    totalDiff: number;
+  } = useMemo(() => {
+    const { rows, globalMaxYear, secondLargestYear } = buildingChargeRows;
+    if (globalMaxYear === undefined) {
+      return { rows: [], totalPrev: 0, totalNext: 0, totalDiff: 0 };
+    }
+
+    const summaries = new Map<
+      string,
+      { prev: number; next: number; labels: Set<string> }
+    >();
+
+    for (const r of rows) {
+      const charge = charges.find((c) => c.id === r.chargeId);
+      const sku = charge?.sku ?? 'N/A';
+      const label = charge?.label ?? '';
+      if (!summaries.has(sku)) {
+        summaries.set(sku, { prev: 0, next: 0, labels: new Set<string>() });
+      }
+      const entry = summaries.get(sku)!;
+      if (label) {
+        entry.labels.add(label);
+      }
+      if (r.year === globalMaxYear) {
+        entry.next += r.amount;
+      } else if (secondLargestYear !== undefined && r.year === secondLargestYear) {
+        entry.prev += r.amount;
+      }
+    }
+
+    const rowsOut: SkuYearSummary[] = [];
+    let totalPrev = 0;
+    let totalNext = 0;
+
+    summaries.forEach((v, sku) => {
+      const diff = v.next - v.prev;
+      rowsOut.push({
+        sku,
+        labels: Array.from(v.labels),
+        prevYearAmount: v.prev,
+        nextYearAmount: v.next,
+        diff,
+      });
+      totalPrev += v.prev;
+      totalNext += v.next;
+    });
+
+    const totalDiff = totalNext - totalPrev;
+    return { rows: rowsOut, totalPrev, totalNext, totalDiff };
+  }, [buildingChargeRows, charges]);
 
   // Keep regulation run expense totals in sync with edited public charges.
   // Logic:
@@ -248,13 +484,101 @@ function App() {
     [bookingResults],
   );
 
-  const [showRegulationSuccessDialog, setShowRegulationSuccessDialog] =
-    useState(false);
-  const [showCostChangesSuccessDialog, setShowCostChangesSuccessDialog] =
-    useState(false);
+  const distributionRows = useMemo<DistributionRow[]>(
+    () =>
+      invoicePreviews.flatMap((inv) => {
+        const unit = units.find(
+          (u) => u.name === inv.unitName && u.buildingId === building.id,
+        );
+        const booking = bookings.find((b) => b.id === inv.bookingId);
+
+        const baseRow = {
+          bookingId: inv.bookingId,
+          tenantName: inv.tenantName,
+          unitName: inv.unitName,
+          areaSqm: unit?.areaSqm ?? '–',
+          leaseStart: booking?.startDate,
+          leaseEnd: booking?.endDate,
+        };
+
+        const rentRow: DistributionRow = {
+          id: `${inv.bookingId}-rent`,
+          ...baseRow,
+          description: 'Rent',
+          currentAmount: inv.oldMonthlyRent,
+          adjustmentAmount: inv.monthlyAdjustment,
+          newAmount: inv.newMonthlyRent,
+          recurring: true,
+        };
+
+        const depositRow: DistributionRow = {
+          id: `${inv.bookingId}-deposit`,
+          ...baseRow,
+          description: 'Deposit',
+          currentAmount: inv.oldMonthlyRent * 3,
+          adjustmentAmount: inv.monthlyAdjustment * 3,
+          newAmount: inv.newMonthlyRent * 3,
+          recurring: false,
+        };
+
+        const prepaidRow: DistributionRow = {
+          id: `${inv.bookingId}-prepaid`,
+          ...baseRow,
+          description: 'Prepaid rent',
+          currentAmount: inv.oldMonthlyRent,
+          adjustmentAmount: inv.monthlyAdjustment,
+          newAmount: inv.newMonthlyRent,
+          recurring: false,
+        };
+
+        return [rentRow, depositRow, prepaidRow];
+      }),
+    [invoicePreviews, units, building.id],
+  );
+
+  const [isRunningRegulation, setIsRunningRegulation] = useState(false);
+  const [regulationCompleted, setRegulationCompleted] = useState(false);
+  const [regulationLocked, setRegulationLocked] = useState(false);
+  const [costLocked, setCostLocked] = useState(false);
+  const [showRunSuccess, setShowRunSuccess] = useState(false);
+  const [showDistributionSuccess, setShowDistributionSuccess] = useState(false);
+  const [isApplyingCostChanges, setIsApplyingCostChanges] = useState(false);
+  const [showCostSuccess, setShowCostSuccess] = useState(false);
 
   const handleRunRegulationFromInvoices = () => {
-    setShowRegulationSuccessDialog(true);
+    if (isRunningRegulation || regulationCompleted) {
+      return;
+    }
+    setIsRunningRegulation(true);
+    // Simulate async processing for the prototype so the progress state is visible
+    setTimeout(() => {
+      setIsRunningRegulation(false);
+      setRegulationCompleted(true);
+      setRegulationLocked(true);
+      setShowRunSuccess(true);
+      setShowDistributionSuccess(true);
+
+      setTimeout(() => {
+        setShowRunSuccess(false);
+        setShowDistributionSuccess(false);
+      }, 2000);
+    }, 800);
+  };
+
+  const handleApplyCostChanges = () => {
+    if (isApplyingCostChanges || costLocked) {
+      return;
+    }
+    setIsApplyingCostChanges(true);
+    setTimeout(() => {
+      setIsApplyingCostChanges(false);
+      setShowCostSuccess(true);
+      setCostLocked(true);
+
+      setTimeout(() => {
+        setShowCostSuccess(false);
+      }, 2000);
+    }, 800);
   };
 
   const deriveRetroPeriod = (adjustmentDateIso: string) => {
@@ -290,29 +614,6 @@ function App() {
     if (type === 'shared') return 'Shared apartments';
     if (type === 'commercial') return 'Commercial units';
     return type;
-  };
-
-  const handleAddChargeRow = () => {
-    const newId = `pc-${Date.now()}`;
-    const today = new Date();
-    const year = today.getFullYear();
-    const start = `${year}-01-01`;
-    const end = `${year}-12-31`;
-    setCharges((prev) => [
-      ...prev,
-      {
-        id: newId,
-        buildingId: building.id,
-        label: '',
-        periodType: 'year',
-        prevPeriodFrom: '',
-        prevPeriodTo: '',
-        prevAmount: 0,
-        nextPeriodFrom: start,
-        nextPeriodTo: end,
-        nextAmount: 0,
-      },
-    ]);
   };
 
   const handleStartRegulation = () => {
@@ -494,24 +795,62 @@ function App() {
             <div className="grid-2">
               <div className="panel">
                 <h3>Summary</h3>
-                <p>
-                  Previous expenses:{' '}
-                  <strong>
-                    {run.totalPrevExpenses.toLocaleString('da-DK')} kr / year
-                  </strong>
-                </p>
-                <p>
-                  Next expenses:{' '}
-                  <strong>
-                    {run.totalNextExpenses.toLocaleString('da-DK')} kr / year
-                  </strong>
-                </p>
-                <p>
-                  Δ expenses:{' '}
-                  <strong>
-                    {recomputedRun.totalDelta.toLocaleString('da-DK')} kr / year
-                  </strong>
-                </p>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Expense name</th>
+                      <th>SKU</th>
+                      <th>
+                        Previous year{' '}
+                        {buildingChargeRows.secondLargestYear ?? '–'}
+                      </th>
+                      <th>
+                        New year {buildingChargeRows.globalMaxYear ?? '–'}
+                      </th>
+                      <th>Difference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {skuSummaries.rows.map((row) => (
+                      <tr key={row.sku}>
+                        <td>{row.labels.join(', ') || '–'}</td>
+                        <td>{row.sku}</td>
+                        <td>
+                          {row.prevYearAmount.toLocaleString('da-DK')} kr / year
+                        </td>
+                        <td>
+                          {row.nextYearAmount.toLocaleString('da-DK')} kr / year
+                        </td>
+                        <td>
+                          {row.diff >= 0 ? '+' : ''}
+                          {row.diff.toLocaleString('da-DK')} kr / year
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td>
+                        <strong>Total</strong>
+                      </td>
+                      <td />
+                      <td>
+                        <strong>
+                          {skuSummaries.totalPrev.toLocaleString('da-DK')} kr / year
+                        </strong>
+                      </td>
+                      <td>
+                        <strong>
+                          {skuSummaries.totalNext.toLocaleString('da-DK')} kr / year
+                        </strong>
+                      </td>
+                      <td>
+                        <strong>
+                          {skuSummaries.totalDiff >= 0 ? '+' : ''}
+                          {skuSummaries.totalDiff.toLocaleString('da-DK')} kr / year
+                        </strong>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
                 <p>
                   Rentable area (included units):{' '}
                   <strong>
@@ -546,21 +885,11 @@ function App() {
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Label</th>
-                      <th>
-                        <button
-                          type="button"
-                          className="table-sort"
-                          onClick={() =>
-                            setChargeYearSort((prev) =>
-                              prev === 'asc' ? 'desc' : 'asc',
-                            )
-                          }
-                        >
-                          Year {chargeYearSort === 'asc' ? '↑' : '↓'}
-                        </button>
-                      </th>
+                      <th>Expense name</th>
+                      <th>SKU</th>
+                      <th>Date</th>
                       <th>Amount / year</th>
+                      <th>VAT</th>
                       <th>Documentation</th>
                       <th />
                     </tr>
@@ -582,97 +911,52 @@ function App() {
                         <tr
                           key={row.id}
                           className={isHistorical ? 'table-row-historical' : undefined}
+                          onClick={() => {
+                            if (!isHistorical && charge && !regulationLocked) {
+                              openEditExpenseModal(charge.id);
+                            }
+                          }}
                         >
                           <td>
                             {isHistorical ? (
-                              <span className="historical-text">{row.label}</span>
+                              <span className="historical-text">
+                                {charge?.label ?? row.label}
+                              </span>
                             ) : (
-                              <input
-                                type="text"
-                                className="inline-input"
-                                value={row.label}
-                                placeholder="e.g. Municipal property tax"
-                                onChange={(e) =>
-                                  setCharges((prev) =>
-                                    prev.map((c) =>
-                                      c.id === row.chargeId
-                                        ? { ...c, label: e.target.value }
-                                        : c,
-                                    ),
-                                  )
-                                }
-                              />
-                            )}
-                          </td>
-                          <td>
-                            {isHistorical ? (
-                              <span className="historical-text">{row.year}</span>
-                            ) : (
-                              <input
-                                type="number"
-                                className="inline-input"
-                                value={row.year}
-                                onChange={(e) => {
-                                  const y =
-                                    Number(e.target.value) ||
-                                    new Date().getFullYear();
-                                  const from = `${y}-01-01`;
-                                  const to = `${y}-12-31`;
-                                  setCharges((prev) =>
-                                    prev.map((c) =>
-                                      c.id === row.chargeId
-                                        ? row.which === 'prev'
-                                          ? {
-                                              ...c,
-                                              prevPeriodFrom: from,
-                                              prevPeriodTo: to,
-                                            }
-                                          : {
-                                              ...c,
-                                              nextPeriodFrom: from,
-                                              nextPeriodTo: to,
-                                            }
-                                        : c,
-                                    ),
-                                  );
-                                }}
-                              />
+                              <span>{charge?.label ?? row.label}</span>
                             )}
                           </td>
                           <td>
                             {isHistorical ? (
                               <span className="historical-text">
-                                {row.amount.toLocaleString('da-DK')} kr
+                                {charge?.sku ?? '–'}
                               </span>
                             ) : (
-                              <>
-                                <input
-                                  type="number"
-                                  className="inline-input"
-                                  value={row.amount}
-                                  onChange={(e) =>
-                                    setCharges((prev) =>
-                                      prev.map((c) =>
-                                        c.id === row.chargeId
-                                          ? row.which === 'prev'
-                                            ? {
-                                                ...c,
-                                                prevAmount:
-                                                  Number(e.target.value) || 0,
-                                              }
-                                            : {
-                                                ...c,
-                                                nextAmount:
-                                                  Number(e.target.value) || 0,
-                                              }
-                                          : c,
-                                      ),
-                                    )
-                                  }
-                                />{' '}
-                                kr
-                              </>
+                              <span>{charge?.sku ?? '–'}</span>
                             )}
+                          </td>
+                          <td>
+                            {isHistorical ? (
+                              <span className="historical-text">
+                                {charge?.date ? formatDate(charge.date) : '–'}
+                              </span>
+                            ) : (
+                              <span>
+                                {charge?.date ? formatDate(charge.date) : '–'}
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            <span className={isHistorical ? 'historical-text' : undefined}>
+                              {row.amount.toLocaleString('da-DK')} kr
+                            </span>
+                          </td>
+                          <td>
+                            <span className={isHistorical ? 'historical-text' : undefined}>
+                              {charge?.vat !== undefined && charge.vat !== null
+                                ? `${charge.vat.toLocaleString('da-DK')}`
+                                : '–'}
+                            </span>
                           </td>
                           <td>
                             {isHistorical ? (
@@ -709,7 +993,9 @@ function App() {
                             ) : (
                               <input
                                 type="file"
+                                disabled={regulationLocked}
                                 onChange={(e) => {
+                                  if (regulationLocked) return;
                                   const file = e.target.files?.[0];
                                   if (!file) return;
                                   setCharges((prev) =>
@@ -732,41 +1018,30 @@ function App() {
                             )}
                           </td>
                           <td>
-                            {!isHistorical && (
-                              <button
-                                className="text-button"
-                                onClick={() =>
-                                  setCharges((prev) =>
-                                    prev.map((c) =>
-                                      c.id === row.chargeId
-                                        ? row.which === 'prev'
-                                          ? {
-                                              ...c,
-                                              prevPeriodFrom: '',
-                                              prevPeriodTo: '',
-                                              prevAmount: 0,
-                                            }
-                                          : {
-                                              ...c,
-                                              nextPeriodFrom: '',
-                                              nextPeriodTo: '',
-                                              nextAmount: 0,
-                                            }
-                                        : c,
-                                    ),
-                                  )
-                                }
-                              >
-                                Delete
-                              </button>
-                            )}
+                          {!isHistorical && charge && (
+                            <button
+                              className="text-button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteExpense(charge.id);
+                              }}
+                              disabled={regulationLocked}
+                            >
+                              Delete
+                            </button>
+                          )}
                           </td>
                         </tr>
                       );
                     })}
 </tbody>
                 </table>
-                <button className="outline-btn" onClick={handleAddChargeRow}>
+                <button
+                  className="outline-btn"
+                  onClick={openNewExpenseModal}
+                  style={{ marginTop: '1rem' }}
+                  disabled={regulationLocked}
+                >
                   Add expense
                 </button>
                 <p className="hint">
@@ -814,7 +1089,9 @@ function App() {
                     <input
                       type="checkbox"
                       checked={run.retroactiveEnabled}
+                      disabled={regulationLocked}
                       onChange={(e) => {
+                        if (regulationLocked) return;
                         const enabled = e.target.checked;
                         let nextRun: RegulationRun = {
                           ...run,
@@ -849,6 +1126,7 @@ function App() {
                       <input
                         type="date"
                         value={run.retroFrom ?? ''}
+                        disabled={regulationLocked}
                         onChange={(e) =>
                           setRun({ ...run, retroFrom: e.target.value })
                         }
@@ -859,6 +1137,7 @@ function App() {
                       <input
                         type="date"
                         value={run.retroTo ?? ''}
+                        disabled={regulationLocked}
                         onChange={(e) =>
                           setRun({ ...run, retroTo: e.target.value })
                         }
@@ -871,28 +1150,64 @@ function App() {
 
             <div className="grid-2">
               <div className="panel" style={{ marginBottom: '0.75rem' }}>
-                <h3>SKU and Invoicing entity</h3>
+                <h3>Which charges do you want to regulate?</h3>
                 <p className="hint">
                   Identify invoicing lines that should be regulated by selecting
-                  SKU and select invoicing entity to issue new regulated rent.
+                  SKUs.
                 </p>
                 <div className="field">
-                  <label>SKU</label>
+                  <label>Select SKU</label>
                   <select
+                    className="inline-input"
                     value={selectedSku}
+                    disabled={regulationLocked}
                     onChange={(e) => setSelectedSku(e.target.value)}
                   >
                     {skuOptions.map((sku) => (
-                      <option key={sku} value={sku}>
-                        {sku}
+                      <option key={sku.id} value={sku.id}>
+                        {sku.label}
                       </option>
                     ))}
                   </select>
                 </div>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <h4 style={{ margin: 0, marginBottom: '0.25rem' }}>
+                    Included unit types
+                  </h4>
+                  {unitTypes.map((type) => (
+                    <div key={type} className="field checkbox">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={includedTypes[type] ?? true}
+                          disabled={regulationLocked}
+                          onChange={(e) => {
+                            if (regulationLocked) return;
+                            setIncludedTypes((prev) => ({
+                              ...prev,
+                              [type]: e.target.checked,
+                            }));
+                          }}
+                        />
+                        {formatUnitTypeLabel(type)}
+                      </label>
+                    </div>
+                  ))}
+                  <p className="hint">
+                    Excluded unit types will not be used to distribute expenses and
+                    will not receive adjustments, invoices, or notifications.
+                  </p>
+                </div>
+              </div>
+
+              <div className="panel" style={{ marginBottom: '0.75rem' }}>
+                <h3>New invoicing lines setup</h3>
                 <div className="field">
                   <label>Invoicing entity</label>
                   <select
+                    className="inline-input"
                     value={selectedInvoicingEntity}
+                    disabled={regulationLocked}
                     onChange={(e) => setSelectedInvoicingEntity(e.target.value)}
                   >
                     {invoicingEntities.map((entity) => (
@@ -903,39 +1218,40 @@ function App() {
                   </select>
                 </div>
               </div>
-
-              <div className="panel" style={{ marginBottom: '0.75rem' }}>
-                <h3>Included unit types</h3>
-                {unitTypes.map((type) => (
-                  <div key={type} className="field checkbox">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={includedTypes[type] ?? true}
-                        onChange={(e) =>
-                          setIncludedTypes((prev) => ({
-                            ...prev,
-                            [type]: e.target.checked,
-                          }))
-                        }
-                      />
-                      {formatUnitTypeLabel(type)}
-                    </label>
-                  </div>
-                ))}
-                <p className="hint">
-                  Excluded unit types will not be used to distribute expenses and
-                  will not receive adjustments, invoices, or notifications.
-                </p>
-              </div>
             </div>
-            <div style={{ marginTop: '1rem', textAlign: 'right' }}>
-              <button
-                className="primary-btn"
-                onClick={() => setActiveTab('invoices')}
+            <div style={{ marginTop: '1rem', textAlign: 'left' }}>
+              <div
+                style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}
               >
-                Calculate distribution per booking
-              </button>
+                <button
+                  className={`primary-btn${
+                    showDistributionSuccess ? ' success' : ''
+                  }`}
+                  onClick={() => setActiveTab('invoices')}
+                  disabled={regulationLocked && !showDistributionSuccess}
+                >
+                  {regulationLocked
+                    ? '✓ Distribution calculated'
+                    : 'Calculate distribution per booking'}
+                </button>
+                {regulationLocked && (
+                  <button
+                    className="primary-btn"
+                    onClick={() => {
+                      setRegulationLocked(false);
+                      setRegulationCompleted(false);
+                      setIsRunningRegulation(false);
+                      setShowRunSuccess(false);
+                      setShowDistributionSuccess(false);
+                      setIsApplyingCostChanges(false);
+                      setShowCostSuccess(false);
+                      setCostLocked(false);
+                    }}
+                  >
+                    Reopen setup and re-run regulation
+                  </button>
+                )}
+              </div>
             </div>
           </section>
         )}
@@ -956,6 +1272,10 @@ function App() {
                   <strong>
                     {recomputedRun.adjustmentPerSqm.toFixed(2)} kr / sqm / year
                   </strong>
+                </p>
+                <p>
+                  Adjustment date:{' '}
+                  <strong>{formatDate(run.adjustmentStartDate)}</strong>
                 </p>
                 <p>
                   Undistributed taxes &amp; fees (landlord&apos;s annual
@@ -982,104 +1302,96 @@ function App() {
                   <th>Unit size (sqm)</th>
                   <th>Lease start</th>
                   <th>Lease end</th>
-                  <th>Base rent</th>
-                  <th>Public taxes & fees</th>
-                  <th>New monthly rent</th>
-                  <th>Applied from</th>
-                  <th>% increase</th>
+                  <th>Description</th>
+                  <th>Recurring</th>
+                  <th>Current amount</th>
+                  <th>Adjustment amount</th>
+                  <th>New amount</th>
                   <th>Exclude from application</th>
                   <th>Retroactive amount</th>
                 </tr>
               </thead>
               <tbody>
-                {invoicePreviews.map((inv) => (
-                  <tr key={inv.bookingId}>
-                    <td>{inv.tenantName}</td>
-                    <td>{inv.unitName}</td>
-                    <td>
-                      {(
-                        units.find(
-                          (u) =>
-                            u.name === inv.unitName &&
-                            u.buildingId === building.id,
-                        )?.areaSqm ?? '–'
-                      ).toString()}
-                    </td>
-                    <td>
-                      {formatDate(
-                        bookings.find((b) => b.id === inv.bookingId)?.startDate,
-                      )}
-                    </td>
-                    <td>
-                      {formatDate(
-                        bookings.find((b) => b.id === inv.bookingId)?.endDate,
-                      )}
-                    </td>
-                    <td>{inv.oldMonthlyRent.toLocaleString('da-DK')} kr</td>
-                    <td>
-                      {inv.monthlyAdjustment.toLocaleString('da-DK', {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}{' '}
-                      kr
-                    </td>
-                    <td>
-                      {inv.newMonthlyRent.toLocaleString('da-DK', {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}{' '}
-                      kr
-                    </td>
-                    <td>
-                      {bookingSettings.find(
-                        (s) =>
-                          s.bookingId === inv.bookingId &&
-                          s.regulationRunId === run.id,
-                      )?.excludeFromApplication
-                        ? '–'
-                        : formatDate(run.adjustmentStartDate)}
-                    </td>
-                    <td>
-                      {inv.oldMonthlyRent > 0
-                        ? `${(
-                            ((inv.newMonthlyRent - inv.oldMonthlyRent) /
-                              inv.oldMonthlyRent) *
-                            100
-                          ).toFixed(1)}%`
-                        : '0.0%'}
-                    </td>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={
-                          bookingSettings.find(
-                            (s) =>
-                              s.bookingId === inv.bookingId &&
-                              s.regulationRunId === run.id,
-                          )?.excludeFromApplication ?? false
-                        }
-                        onChange={(e) =>
-                          setBookingSettings((prev) =>
-                            prev.map((s) =>
-                              s.bookingId === inv.bookingId &&
-                              s.regulationRunId === run.id
-                                ? {
-                                    ...s,
-                                    excludeFromApplication: e.target.checked,
-                                  }
-                                : s,
-                            ),
-                          )
-                        }
-                      />
-                    </td>
-                    <td>
-                      {inv.retroactiveAmount > 0
-                        ? `${inv.retroactiveAmount.toFixed(0)} kr`
-                        : '0 kr'}
-                    </td>
-                  </tr>
-                ))}
+                {distributionRows.map((row) => {
+                  const isRentRow = row.description === 'Rent';
+                  const invoice = invoicePreviews.find(
+                    (inv) => inv.bookingId === row.bookingId,
+                  );
+
+                  const setting = bookingSettings.find(
+                    (s) =>
+                      s.bookingId === row.bookingId &&
+                      s.regulationRunId === run.id,
+                  );
+
+                  return (
+                    <tr key={row.id}>
+                      <td>{row.tenantName}</td>
+                      <td>{row.unitName}</td>
+                      <td>{row.areaSqm}</td>
+                      <td>{formatDate(row.leaseStart)}</td>
+                      <td>{formatDate(row.leaseEnd)}</td>
+                      <td>{row.description}</td>
+                      <td>
+                        <span aria-hidden="true">
+                          {row.recurring ? '✓' : '✕'}
+                        </span>
+                      </td>
+                      <td>
+                        {row.currentAmount.toLocaleString('da-DK', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        kr
+                      </td>
+                      <td>
+                        {row.adjustmentAmount.toLocaleString('da-DK', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        kr
+                      </td>
+                      <td>
+                        {row.newAmount.toLocaleString('da-DK', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        kr
+                      </td>
+                      <td>
+                        {isRentRow && (
+                          <input
+                            type="checkbox"
+                            checked={setting?.excludeFromApplication ?? false}
+                            disabled={regulationLocked}
+                            onChange={(e) => {
+                              if (regulationLocked) return;
+                              setBookingSettings((prev) =>
+                                prev.map((s) =>
+                                  s.bookingId === row.bookingId &&
+                                  s.regulationRunId === run.id
+                                    ? {
+                                        ...s,
+                                        excludeFromApplication: e.target
+                                          .checked,
+                                      }
+                                    : s,
+                                ),
+                              );
+                            }}
+                          />
+                        )}
+                      </td>
+                      <td>
+                        {isRentRow && invoice && invoice.retroactiveAmount > 0
+                          ? `${invoice.retroactiveAmount.toFixed(0)} kr`
+                          : isRentRow
+                          ? '0 kr'
+                          : '–'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             <div className="panel" style={{ marginTop: '1rem' }}>
@@ -1089,58 +1401,27 @@ function App() {
                     type="checkbox"
                     checked={autoApproveInvoices}
                     onChange={(e) => setAutoApproveInvoices(e.target.checked)}
+                    disabled={isRunningRegulation || regulationLocked}
                   />
                   Automatically approve new invoicing lines
                 </label>
               </div>
               <button
-                className="primary-btn"
+                className={`primary-btn${showRunSuccess ? ' success' : ''}`}
                 onClick={handleRunRegulationFromInvoices}
+                disabled={
+                  isRunningRegulation ||
+                  (regulationCompleted && !showRunSuccess)
+                }
               >
-                Run rent regulation
+                {isRunningRegulation
+                  ? 'Running rent regulation…'
+                  : regulationCompleted
+                  ? '✓ Rent regulation completed'
+                  : 'Run rent regulation'}
               </button>
             </div>
           </section>
-        )}
-
-        {showRegulationSuccessDialog && (
-          <div className="dialog-backdrop">
-            <div className="dialog">
-              <h3>Rent regulation completed</h3>
-              <p>
-                Rent regulation has been successfully applied and new invoicing
-                lines have been created.
-              </p>
-              <div style={{ marginTop: '1rem', textAlign: 'right' }}>
-                <button
-                  className="primary-btn"
-                  onClick={() => {
-                    setShowRegulationSuccessDialog(false);
-                    setActiveTab('notifications');
-                  }}
-                >
-                  Next: Review tenant notification
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {showCostChangesSuccessDialog && (
-          <div className="dialog-backdrop">
-            <div className="dialog">
-              <h3>Cost changes applied</h3>
-              <p>Rent cost changes have been successfully applied.</p>
-              <div style={{ marginTop: '1rem', textAlign: 'right' }}>
-                <button
-                  className="primary-btn"
-                  onClick={() => setShowCostChangesSuccessDialog(false)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
         )}
 
         {activeTab === 'notifications' && (
@@ -1283,9 +1564,6 @@ function App() {
                 </article>
               ) : null;
             })()}
-            <button className="primary-btn" onClick={() => setActiveTab('templates')}>
-              Next: Review cost adjustments
-            </button>
           </section>
         )}
 
@@ -1337,6 +1615,7 @@ function App() {
                             type="number"
                             className="inline-input"
                             value={suggested}
+                            disabled={isApplyingCostChanges || costLocked}
                             onChange={(e) =>
                               setTemplateOverrides((prev) => ({
                                 ...prev,
@@ -1352,12 +1631,115 @@ function App() {
               </tbody>
             </table>
             <button
-              className="primary-btn"
-              onClick={() => setShowCostChangesSuccessDialog(true)}
+              className={`primary-btn${showCostSuccess ? ' success' : ''}`}
+              onClick={handleApplyCostChanges}
+              disabled={isApplyingCostChanges || costLocked}
             >
-              Apply rent cost changes
+              {isApplyingCostChanges
+                ? 'Applying rent cost changes…'
+                : costLocked
+                ? '✓ Rent cost changes applied'
+                : 'Apply rent cost changes'}
             </button>
           </section>
+        )}
+
+        {showExpenseModal && (
+          <div className="dialog-backdrop">
+            <div className="dialog" style={{ maxWidth: '520px' }}>
+              <h3>{editingExpenseId ? 'Edit expense' : 'Add expense'}</h3>
+              <div className="field">
+                <label>Expense name *</label>
+                <input
+                  type="text"
+                  value={expenseForm.label}
+                  onChange={(e) =>
+                    handleExpenseFormChange('label', e.target.value)
+                  }
+                  placeholder="e.g. Municipal property tax"
+                />
+              </div>
+              <div className="field">
+                <label>SKU *</label>
+                <select
+                  className="inline-input"
+                  value={expenseForm.sku}
+                  onChange={(e) =>
+                    handleExpenseFormChange('sku', e.target.value)
+                  }
+                >
+                  {expenseSkuOptions.map((sku) => (
+                    <option key={sku.id} value={sku.id}>
+                      {sku.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label>Date *</label>
+                <input
+                  type="date"
+                  value={expenseForm.date}
+                  onChange={(e) =>
+                    handleExpenseFormChange('date', e.target.value)
+                  }
+                />
+              </div>
+              <div className="field">
+                <label>Amount (per year) *</label>
+                <input
+                  type="number"
+                  value={expenseForm.amount}
+                  onChange={(e) =>
+                    handleExpenseFormChange(
+                      'amount',
+                      e.target.value === '' ? '' : Number(e.target.value),
+                    )
+                  }
+                />
+              </div>
+              <div className="field">
+                <label>VAT</label>
+                <input
+                  type="number"
+                  value={expenseForm.vat}
+                  onChange={(e) =>
+                    handleExpenseFormChange(
+                      'vat',
+                      e.target.value === '' ? '' : Number(e.target.value),
+                    )
+                  }
+                />
+              </div>
+              <p className="hint">Fields marked * are required.</p>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  marginTop: '1rem',
+                }}
+              >
+                {editingExpenseId ? (
+                  <button
+                    className="text-button"
+                    onClick={() => handleDeleteExpense(editingExpenseId)}
+                  >
+                    Delete expense
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button className="outline-btn" onClick={closeExpenseModal}>
+                    Cancel
+                  </button>
+                  <button className="primary-btn" onClick={handleSaveExpense}>
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

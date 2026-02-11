@@ -617,39 +617,86 @@ export const bookings: Booking[] = [
   },
 ];
 
-// Example: one yearly municipal property tax increase for 2026
+// Example: seeded yearly expenses for 2025 (previous) and 2026 (new)
 export const publicCharges: PublicCharge[] = [
   {
     id: 'pc1',
     buildingId: 'b1',
-    label: 'Kommunal ejendomsskat',
+    label: 'Municipality taxes',
+    sku: '1001',
+    date: '2026-01-01',
+    vat: 0,
     includeInCalculation: true,
     periodType: 'year',
     prevPeriodFrom: '2025-01-01',
     prevPeriodTo: '2025-12-31',
-    prevAmount: 240000, // DKK per year
+    prevAmount: 190790.49,
     nextPeriodFrom: '2026-01-01',
     nextPeriodTo: '2026-12-31',
-    nextAmount: 270000,
+    nextAmount: 209205.6,
   },
   {
     id: 'pc2',
     buildingId: 'b1',
-    label: 'Kommunal ejendomsskat (2024)',
-    includeInCalculation: false,
+    label: 'Renovationsafg. - Bolig var. OMK',
+    sku: '1006',
+    date: '2026-01-01',
+    vat: 0,
+    includeInCalculation: true,
     periodType: 'year',
-    prevPeriodFrom: '2023-01-01',
-    prevPeriodTo: '2023-12-31',
-    prevAmount: 220000,
-    nextPeriodFrom: '2024-01-01',
-    nextPeriodTo: '2024-12-31',
-    nextAmount: 230000,
+    prevPeriodFrom: '2025-01-01',
+    prevPeriodTo: '2025-12-31',
+    prevAmount: 76481.93,
+    nextPeriodFrom: '2026-01-01',
+    nextPeriodTo: '2026-12-31',
+    nextAmount: 120962.0,
+  },
+  {
+    id: 'pc3',
+    buildingId: 'b1',
+    label: 'Rottebekæmpelse',
+    sku: '1007',
+    date: '2026-01-01',
+    vat: 0,
+    includeInCalculation: true,
+    periodType: 'year',
+    prevPeriodFrom: '2025-01-01',
+    prevPeriodTo: '2025-12-31',
+    prevAmount: 1095.33,
+    nextPeriodFrom: '2026-01-01',
+    nextPeriodTo: '2026-12-31',
+    nextAmount: 2911.35,
+  },
+  {
+    id: 'pc4',
+    buildingId: 'b1',
+    label: 'Elafgift m.m. - Bolig var. OMK',
+    sku: '1004',
+    date: '2026-01-01',
+    vat: 0,
+    includeInCalculation: true,
+    periodType: 'year',
+    prevPeriodFrom: '2025-01-01',
+    prevPeriodTo: '2025-12-31',
+    prevAmount: 53633.68,
+    nextPeriodFrom: '2026-01-01',
+    nextPeriodTo: '2026-12-31',
+    nextAmount: 26293.59,
   },
 ];
 
 const totalAreaSqm = units.reduce((sum, u) => sum + u.areaSqm, 0);
 
 // Default regulation run used in the prototype (active run for editing)
+const seededPrevTotal = publicCharges.reduce(
+  (sum, c) => sum + c.prevAmount,
+  0,
+);
+const seededNextTotal = publicCharges.reduce(
+  (sum, c) => sum + c.nextAmount,
+  0,
+);
+
 export const initialRegulationRun: RegulationRun = {
   id: 'rr1',
   buildingId: 'b1',
@@ -658,12 +705,11 @@ export const initialRegulationRun: RegulationRun = {
   adjustmentStartDate: '2026-09-01',
   retroactiveEnabled: false,
   status: 'draft',
-  totalPrevExpenses: publicCharges[0].prevAmount,
-  totalNextExpenses: publicCharges[0].nextAmount,
-  totalDelta: publicCharges[0].nextAmount - publicCharges[0].prevAmount,
+  totalPrevExpenses: seededPrevTotal,
+  totalNextExpenses: seededNextTotal,
+  totalDelta: seededNextTotal - seededPrevTotal,
   totalRentableAreaSqm: totalAreaSqm,
-  adjustmentPerSqm:
-    (publicCharges[0].nextAmount - publicCharges[0].prevAmount) / totalAreaSqm,
+  adjustmentPerSqm: (seededNextTotal - seededPrevTotal) / totalAreaSqm,
 };
 
 // Regulation runs for display in Buildings screen (current + historical)

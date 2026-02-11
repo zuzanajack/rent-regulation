@@ -34,6 +34,11 @@ export interface PublicCharge {
   id: string;
   buildingId: string;
   label: string;
+  // New fields for richer expense modeling
+  sku?: string;
+  /** Representative date for this expense (e.g. in the new period) */
+  date?: string; // ISO YYYY-MM-DD
+  vat?: number;
   periodType: PeriodType;
   includeInCalculation?: boolean;
   prevPeriodFrom: string;

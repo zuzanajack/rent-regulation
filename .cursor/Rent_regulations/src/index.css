@@ -36,8 +36,22 @@ button {
   margin-top: 24px;
 }
 
-button:hover {
+.primary-btn.success {
+  background-color: #16a34a;
+}
+
+button:not(:disabled):hover {
   background-color: #b35e2c;
+}
+
+button:disabled {
+  background-color: #e5e7eb;
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+.primary-btn.success:disabled {
+  color: #ffffff;
 }
 
 button:focus,

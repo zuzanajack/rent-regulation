@@ -173,11 +173,27 @@ h3 {
   color: #4b5563;
 }
 
-.field input[type='date'] {
+.field input[type='text'],
+.field input[type='number'],
+.field input[type='date'],
+.field input[type='email'],
+.field input[type='search'] {
   padding: 0.4rem 0.5rem;
   border-radius: 0.4rem;
   border: 1px solid #d1d5db;
   font-size: 0.9rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.field select {
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid #d1d5db;
+  font-size: 0.9rem;
+  background-color: #ffffff;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .field.checkbox {
