@@ -19,17 +19,44 @@ function daysBetweenInclusive(from: Date, to: Date): number {
   return Math.floor((to.getTime() - from.getTime()) / msPerDay) + 1;
 }
 
-function overlapDays(
+function overlapMonths(
   rangeStart: Date,
   rangeEnd: Date,
   bookingStart: Date,
   bookingEnd?: Date,
 ): number {
-  const end = bookingEnd ?? new Date('9999-12-31T00:00:00');
-  const startMax = rangeStart > bookingStart ? rangeStart : bookingStart;
-  const endMin = rangeEnd < end ? rangeEnd : end;
-  if (endMin < startMax) return 0;
-  return daysBetweenInclusive(startMax, endMin);
+  const bEnd = bookingEnd ?? new Date('9999-12-31T00:00:00');
+  let months = 0;
+
+  let year = rangeStart.getFullYear();
+  let month = rangeStart.getMonth();
+
+  while (true) {
+    const monthStart = new Date(year, month, 1);
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const monthEnd = new Date(year, month, daysInMonth);
+
+    if (monthStart > rangeEnd) break;
+
+    const effectiveStart = monthStart < rangeStart ? rangeStart : monthStart;
+    const effectiveEnd = monthEnd > rangeEnd ? rangeEnd : monthEnd;
+
+    const overlapStart = effectiveStart > bookingStart ? effectiveStart : bookingStart;
+    const overlapEnd = effectiveEnd < bEnd ? effectiveEnd : bEnd;
+
+    if (overlapEnd >= overlapStart) {
+      const overlapDays = daysBetweenInclusive(overlapStart, overlapEnd);
+      months += overlapDays / daysInMonth;
+    }
+
+    month++;
+    if (month > 11) {
+      month = 0;
+      year++;
+    }
+  }
+
+  return months;
 }
 
 export function recomputeTotalsWithExclusions(
@@ -70,7 +97,8 @@ export function computeBookingResults(
   );
 
   const regulationStart = parseDate(run.adjustmentStartDate);
-  const regulationEnd = parseDate(run.adjustmentStartDate); // for prototype, single month focus
+  const adjYear = regulationStart.getFullYear();
+  const regulationEnd = new Date(adjYear, 11, 31);
 
   return buildingBookings.map((booking) => {
     const unit = buildingUnits.find((u) => u.id === booking.unitId);
@@ -79,9 +107,11 @@ export function computeBookingResults(
         regulationRunId: run.id,
         bookingId: booking.id,
         monthlyAdjustment: 0,
+        adjustmentPeriodTotal: 0,
         retroactiveAmount: 0,
         included: false,
         potentialMonthlyAdjustment: 0,
+        potentialPeriodTotal: 0,
         potentialRetroactiveAmount: 0,
       };
     }
@@ -99,75 +129,131 @@ export function computeBookingResults(
     const bookingStart = parseDate(booking.startDate);
     const bookingEnd = booking.endDate ? parseDate(booking.endDate) : undefined;
 
-    const daysInRegPeriod = daysBetweenInclusive(regulationStart, regulationEnd);
-    const bookingDays = overlapDays(
+    const adjMonths = overlapMonths(
       regulationStart,
       regulationEnd,
       bookingStart,
       bookingEnd,
     );
 
-    const proRatedMonthlyAdjustment =
-      run.adjustmentPerSqm === 0 || daysInRegPeriod <= 0
-        ? 0
-        : (unitMonthlyAdjustment * bookingDays) / daysInRegPeriod;
+    const adjustmentPeriodTotal = unitMonthlyAdjustment * adjMonths;
+
+    let retroactiveAmount = 0;
+    if (run.retroactiveEnabled && run.retroFrom && run.retroTo) {
+      const retroFrom = parseDate(run.retroFrom);
+      const retroTo = parseDate(run.retroTo);
+      const retroMonths = overlapMonths(retroFrom, retroTo, bookingStart, bookingEnd);
+      retroactiveAmount = unitMonthlyAdjustment * retroMonths;
+    }
+
+    const potentialPeriodTotal = adjustmentPeriodTotal;
+    const potentialRetroactiveAmount = retroactiveAmount;
 
     const excludedFromCalculation = unitSetting?.excludeFromCalculation ?? false;
     const excludedFromApplication =
       bookingSetting?.excludeFromApplication ?? false;
 
-    // If a unit is excluded from calculation, leases should not appear in
-    // the invoices breakdown, but we still track the potential adjustment
-    // as part of the overall "loss".
-    let retroactiveAmount = 0;
-    if (run.retroactiveEnabled && run.retroFrom && run.retroTo) {
-      const retroFrom = parseDate(run.retroFrom);
-      const retroTo = parseDate(run.retroTo);
-      const retroDays = overlapDays(retroFrom, retroTo, bookingStart, bookingEnd);
-      retroactiveAmount = (unitMonthlyAdjustment / 30) * retroDays;
-    }
-
-    const potentialRetroactiveAmount = retroactiveAmount;
-
     if (excludedFromCalculation) {
-      // Lease and its potential are completely excluded from distribution,
-      // but we still track the potential adjustment as loss.
       return {
         regulationRunId: run.id,
         bookingId: booking.id,
         monthlyAdjustment: 0,
+        adjustmentPeriodTotal: 0,
         retroactiveAmount: 0,
         included: false,
-        potentialMonthlyAdjustment: proRatedMonthlyAdjustment,
+        potentialMonthlyAdjustment: unitMonthlyAdjustment,
+        potentialPeriodTotal,
         potentialRetroactiveAmount,
       };
     }
 
     if (excludedFromApplication) {
-      // Lease stays visible in invoices, but with zero adjustment and
-      // zero retroactive amount; the potential is counted as loss.
       return {
         regulationRunId: run.id,
         bookingId: booking.id,
         monthlyAdjustment: 0,
+        adjustmentPeriodTotal: 0,
         retroactiveAmount: 0,
         included: true,
-        potentialMonthlyAdjustment: proRatedMonthlyAdjustment,
+        potentialMonthlyAdjustment: unitMonthlyAdjustment,
+        potentialPeriodTotal,
         potentialRetroactiveAmount,
       };
     }
 
-    // Normal case: adjustment applied.
     return {
       regulationRunId: run.id,
       bookingId: booking.id,
-      monthlyAdjustment: proRatedMonthlyAdjustment,
+      monthlyAdjustment: unitMonthlyAdjustment,
+      adjustmentPeriodTotal,
       retroactiveAmount,
       included: true,
-      potentialMonthlyAdjustment: proRatedMonthlyAdjustment,
+      potentialMonthlyAdjustment: unitMonthlyAdjustment,
+      potentialPeriodTotal,
       potentialRetroactiveAmount,
     };
   });
+}
+
+export interface VacancyRecord {
+  unitId: string;
+  unitName: string;
+  areaSqm: number;
+  totalMonthsInYear: number;
+  coveredMonths: number;
+  vacantMonths: number;
+  monthlyAdjustment: number;
+  undistributedAmount: number;
+}
+
+export function computeVacancies(
+  run: RegulationRun,
+  building: Building,
+  allUnits: Unit[],
+  allBookings: Booking[],
+  unitSettings: RegulationUnitSetting[],
+): VacancyRecord[] {
+  const buildingUnits = allUnits.filter((u) => u.buildingId === building.id);
+  const adjYear = parseDate(run.adjustmentStartDate).getFullYear();
+  const yearStart = new Date(adjYear, 0, 1);
+  const yearEnd = new Date(adjYear, 11, 31);
+
+  const results: VacancyRecord[] = [];
+
+  for (const unit of buildingUnits) {
+    const unitSetting = unitSettings.find(
+      (s) => s.unitId === unit.id && s.regulationRunId === run.id,
+    );
+    if (unitSetting?.excludeFromCalculation) continue;
+
+    const unitBookings = allBookings.filter((b) => b.unitId === unit.id);
+
+    let coveredMonths = 0;
+    for (const booking of unitBookings) {
+      const bStart = parseDate(booking.startDate);
+      const bEnd = booking.endDate ? parseDate(booking.endDate) : undefined;
+      coveredMonths += overlapMonths(yearStart, yearEnd, bStart, bEnd);
+    }
+
+    coveredMonths = Math.min(coveredMonths, 12);
+    const vacantMonths = 12 - coveredMonths;
+
+    if (vacantMonths > 0.01) {
+      const unitMonthlyAdjustment = (run.adjustmentPerSqm * unit.areaSqm) / 12;
+      results.push({
+        unitId: unit.id,
+        unitName: unit.name,
+        areaSqm: unit.areaSqm,
+        totalMonthsInYear: 12,
+        coveredMonths,
+        vacantMonths,
+        monthlyAdjustment: unitMonthlyAdjustment,
+        undistributedAmount: unitMonthlyAdjustment * vacantMonths,
+      });
+    }
+  }
+
+  return results;
 }
 
 export function buildInvoicePreviews(
@@ -193,8 +279,8 @@ export function buildInvoicePreviews(
         oldMonthlyRent,
         newMonthlyRent,
         monthlyAdjustment: result.monthlyAdjustment,
+        adjustmentPeriodTotal: result.adjustmentPeriodTotal,
         retroactiveAmount: result.retroactiveAmount,
       };
     });
 }
-

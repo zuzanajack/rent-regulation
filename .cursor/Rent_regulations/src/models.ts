@@ -87,9 +87,11 @@ export interface RegulationBookingResult {
   regulationRunId: string;
   bookingId: string;
   monthlyAdjustment: number;
+  adjustmentPeriodTotal: number;
   retroactiveAmount: number;
   included: boolean;
   potentialMonthlyAdjustment: number;
+  potentialPeriodTotal: number;
   potentialRetroactiveAmount: number;
 }
 
@@ -100,7 +102,18 @@ export interface InvoicePreview {
   oldMonthlyRent: number;
   newMonthlyRent: number;
   monthlyAdjustment: number;
+  adjustmentPeriodTotal: number;
   retroactiveAmount: number;
+}
+
+export type ExclusionRuleField = 'leaseEndDate' | 'leaseStartDate';
+export type ExclusionRuleOperator = 'isBefore' | 'isAfter';
+
+export interface ExclusionRule {
+  id: string;
+  field: ExclusionRuleField;
+  operator: ExclusionRuleOperator;
+  value: string; // ISO date, e.g. '2026-01-01'
 }
 
 // Simpler prototype-focused models from the plan

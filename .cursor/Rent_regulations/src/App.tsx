@@ -1,4 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
+import Box from '@mui/material/Box';
+import Chip from '@mui/material/Chip';
+import FormControl from '@mui/material/FormControl';
+import InputLabel from '@mui/material/InputLabel';
+import MenuItem from '@mui/material/MenuItem';
+import Select from '@mui/material/Select';
 import './App.css';
 import {
   bookings,
@@ -14,6 +20,7 @@ import {
 import {
   buildInvoicePreviews,
   computeBookingResults,
+  computeVacancies,
   recomputeTotalsWithExclusions,
 } from './rentRegulationService';
 import type {
@@ -22,6 +29,9 @@ import type {
   RegulationUnitSetting,
   RegulationBookingSetting,
   Unit as UnitModel,
+  ExclusionRule,
+  ExclusionRuleField,
+  ExclusionRuleOperator,
 } from './models';
 
 type Tab = 'buildings' | 'regulation' | 'invoices' | 'notifications' | 'templates';
@@ -58,8 +68,12 @@ function App() {
   const [templateOverrides, setTemplateOverrides] = useState<
     Record<string, number | undefined>
   >({});
-  const [chargeYearSort, setChargeYearSort] = useState<'asc' | 'desc'>('asc');
+  const [chargeYearSort] = useState<'asc' | 'desc'>('asc');
   const [periodSort, setPeriodSort] = useState<'asc' | 'desc'>('desc');
+  const [exclusionRules, setExclusionRules] = useState<ExclusionRule[]>([]);
+  const [showExclusionPopover, setShowExclusionPopover] = useState(false);
+  const [manuallyExcludedBookingIds, setManuallyExcludedBookingIds] = useState<Set<string>>(new Set());
+  const [dismissedSuggestion, setDismissedSuggestion] = useState(false);
 
   const skuOptions = [
     { id: '2001', label: '2001 – Base rent' },
@@ -67,6 +81,7 @@ function App() {
     { id: '2003', label: '2003 – Deposit' },
     { id: '2004', label: '2004 – Prepaid rent' },
     { id: '2005', label: '2005 – Parking' },
+    { id: '3001', label: '3001 – Base rent (Commercial)' },
     { id: '2006', label: '2006 – Storage' },
     { id: '2007', label: '2007 – Service charges' },
   ];
@@ -79,7 +94,7 @@ function App() {
     { id: '1006', label: '1006 – Common area maintenance' },
     { id: '1007', label: '1007 – Other building expenses' },
   ];
-  const [selectedSku, setSelectedSku] = useState<string>(skuOptions[0].id);
+  const [selectedSkus, setSelectedSkus] = useState<string[]>([]);
 
   // Modal state for creating/editing public expenses
   const [showExpenseModal, setShowExpenseModal] = useState(false);
@@ -452,16 +467,94 @@ function App() {
   // Total undistributed taxes & fees (per year) – i.e. the part of the
   // public charges that is NOT allocated to tenants because specific
   // leases were excluded from application.
-  const totalUndistributedTaxesPerYear = useMemo(
+  const totalUndistributed = useMemo(
     () =>
       excludedApplicationResults.reduce((sum, r) => {
-        // r.potentialMonthlyAdjustment is monthly ⇒ convert to yearly
-        const yearlyRecurring = (r.potentialMonthlyAdjustment ?? 0) * 12;
-        const retro = r.potentialRetroactiveAmount ?? 0;
-        return sum + yearlyRecurring + retro;
+        return sum + (r.potentialPeriodTotal ?? 0) + (r.potentialRetroactiveAmount ?? 0);
       }, 0),
     [excludedApplicationResults],
   );
+
+  const totalAdjustmentDistributed = useMemo(() => {
+    return bookingResults
+      .filter((r) => {
+        const setting = bookingSettings.find(
+          (s) => s.bookingId === r.bookingId && s.regulationRunId === run.id,
+        );
+        return setting?.excludeFromApplication !== true;
+      })
+      .reduce((sum, r) => {
+        return sum + (r.adjustmentPeriodTotal ?? 0) + (r.retroactiveAmount ?? 0);
+      }, 0);
+  }, [bookingResults, bookingSettings, run.id]);
+
+  const vacancies = useMemo(
+    () => computeVacancies(run, building, units, bookings, unitSettings),
+    [run, building, units, bookings, unitSettings],
+  );
+
+  const totalVacancyUndistributed = useMemo(
+    () => vacancies.reduce((sum, v) => sum + v.undistributedAmount, 0),
+    [vacancies],
+  );
+
+  const ruleExcludedBookingIds = useMemo(() => {
+    const excluded = new Map<string, string[]>();
+    for (const rule of exclusionRules) {
+      for (const booking of bookings) {
+        const dateValue =
+          rule.field === 'leaseEndDate'
+            ? booking.endDate
+            : rule.field === 'leaseStartDate'
+            ? booking.startDate
+            : undefined;
+        if (!dateValue) continue;
+        const matches =
+          rule.operator === 'isBefore'
+            ? dateValue < rule.value
+            : rule.operator === 'isAfter'
+            ? dateValue > rule.value
+            : false;
+        if (matches) {
+          const existing = excluded.get(booking.id) ?? [];
+          existing.push(rule.id);
+          excluded.set(booking.id, existing);
+        }
+      }
+    }
+    return excluded;
+  }, [exclusionRules]);
+
+  useEffect(() => {
+    setBookingSettings((prev) =>
+      prev.map((s) => {
+        if (s.regulationRunId !== run.id) return s;
+        const isRuleExcluded = ruleExcludedBookingIds.has(s.bookingId);
+        const isManuallyExcluded = manuallyExcludedBookingIds.has(s.bookingId);
+        return {
+          ...s,
+          excludeFromApplication: isRuleExcluded || isManuallyExcluded,
+        };
+      }),
+    );
+  }, [ruleExcludedBookingIds, manuallyExcludedBookingIds, run.id]);
+
+  const manuallyExcludedCount = useMemo(() => {
+    let count = 0;
+    for (const bookingId of manuallyExcludedBookingIds) {
+      if (!ruleExcludedBookingIds.has(bookingId)) {
+        count++;
+      }
+    }
+    return count;
+  }, [manuallyExcludedBookingIds, ruleExcludedBookingIds]);
+
+  const formatRuleLabel = (rule: ExclusionRule) => {
+    const fieldLabel =
+      rule.field === 'leaseEndDate' ? 'Lease end date' : 'Lease start date';
+    const opLabel = rule.operator === 'isBefore' ? 'is before' : 'is after';
+    return `${fieldLabel} ${opLabel} ${formatDate(rule.value)}`;
+  };
 
   const excludedUnitsNames = useMemo(
     () =>
@@ -658,11 +751,16 @@ function App() {
                   const isActive = activeTab === stepConfig.id;
                   const isCompleted =
                     currentStepIndex !== -1 && currentStepIndex > index;
+                  const isStepLocked =
+                    (stepConfig.id === 'regulation' || stepConfig.id === 'invoices') ? regulationLocked :
+                    stepConfig.id === 'templates' ? costLocked :
+                    false;
                   const stepClass = [
                     'nav-btn',
                     'wizard-step',
                     isActive ? 'wizard-step-active' : '',
                     isCompleted ? 'wizard-step-completed' : '',
+                    isStepLocked ? 'wizard-step-locked' : '',
                   ]
                     .filter(Boolean)
                     .join(' ');
@@ -672,7 +770,9 @@ function App() {
                       className={stepClass}
                       onClick={() => setActiveTab(stepConfig.id)}
                     >
-                      <span className="step-index">{stepConfig.step}</span>
+                      {isStepLocked
+                        ? <span className="material-symbols-outlined step-lock-icon">lock</span>
+                        : <span className="step-index">{stepConfig.step}</span>}
                       <span>{stepConfig.label}</span>
                     </button>
                   );
@@ -728,10 +828,12 @@ function App() {
                       Period {periodSort === 'asc' ? '↑' : '↓'}
                     </button>
                   </th>
-                  <th>Total adjustment amount</th>
-                  <th>Total adjustment per sqm</th>
+                  <th className="num">Total adjustment amount</th>
+                  <th className="num">Total adjustment per sqm</th>
+                  <th>Created at</th>
                   <th>Notification date</th>
                   <th>Adjustment date</th>
+                  <th>Retroactive period</th>
                   <th>Included unit types</th>
                 </tr>
               </thead>
@@ -762,20 +864,43 @@ function App() {
                       .join(', ');
                     const periodYear =
                       r.adjustmentStartDate?.slice(0, 4) ?? '–';
+
+                    const regulationDateForRow = (() => {
+                      if (!r.notificationDate) return undefined;
+                      const notif = new Date(`${r.notificationDate}T00:00:00`);
+                      if (Number.isNaN(notif.getTime())) return undefined;
+                      const d = new Date(notif);
+                      d.setDate(d.getDate() - 35);
+                      const y = d.getFullYear();
+                      const m = String(d.getMonth() + 1).padStart(2, '0');
+                      const day = String(d.getDate()).padStart(2, '0');
+                      return `${y}-${m}-${day}`;
+                    })();
+
                     return (
                       <tr key={r.id}>
                         <td>{periodYear}</td>
-                        <td>
+                        <td className="num">
                           {(r.totalNextExpenses - r.totalPrevExpenses).toLocaleString(
                             'da-DK',
                           )}{' '}
                           kr
                         </td>
-                        <td>
+                        <td className="num">
                           {r.adjustmentPerSqm.toFixed(2)} kr / sqm
+                        </td>
+                        <td>
+                          {regulationDateForRow
+                            ? formatDate(regulationDateForRow)
+                            : '–'}
                         </td>
                         <td>{formatDate(r.notificationDate)}</td>
                         <td>{formatDate(r.adjustmentStartDate)}</td>
+                        <td>
+                          {r.retroactiveEnabled && r.retroFrom && r.retroTo
+                            ? `${formatDate(r.retroFrom)} to ${formatDate(r.retroTo)}`
+                            : '–'}
+                        </td>
                         <td>{includedTypesList || '–'}</td>
                       </tr>
                     );
@@ -784,7 +909,7 @@ function App() {
             </table>
             <div style={{ marginTop: '1rem' }}>
               <button className="primary-btn" onClick={handleStartRegulation}>
-                Run rent regulation
+                New rent regulation
               </button>
             </div>
           </section>
@@ -795,62 +920,6 @@ function App() {
             <div className="grid-2">
               <div className="panel">
                 <h3>Summary</h3>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Expense name</th>
-                      <th>SKU</th>
-                      <th>
-                        Previous year{' '}
-                        {buildingChargeRows.secondLargestYear ?? '–'}
-                      </th>
-                      <th>
-                        New year {buildingChargeRows.globalMaxYear ?? '–'}
-                      </th>
-                      <th>Difference</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {skuSummaries.rows.map((row) => (
-                      <tr key={row.sku}>
-                        <td>{row.labels.join(', ') || '–'}</td>
-                        <td>{row.sku}</td>
-                        <td>
-                          {row.prevYearAmount.toLocaleString('da-DK')} kr / year
-                        </td>
-                        <td>
-                          {row.nextYearAmount.toLocaleString('da-DK')} kr / year
-                        </td>
-                        <td>
-                          {row.diff >= 0 ? '+' : ''}
-                          {row.diff.toLocaleString('da-DK')} kr / year
-                        </td>
-                      </tr>
-                    ))}
-                    <tr>
-                      <td>
-                        <strong>Total</strong>
-                      </td>
-                      <td />
-                      <td>
-                        <strong>
-                          {skuSummaries.totalPrev.toLocaleString('da-DK')} kr / year
-                        </strong>
-                      </td>
-                      <td>
-                        <strong>
-                          {skuSummaries.totalNext.toLocaleString('da-DK')} kr / year
-                        </strong>
-                      </td>
-                      <td>
-                        <strong>
-                          {skuSummaries.totalDiff >= 0 ? '+' : ''}
-                          {skuSummaries.totalDiff.toLocaleString('da-DK')} kr / year
-                        </strong>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
                 <p>
                   Rentable area (included units):{' '}
                   <strong>
@@ -863,24 +932,76 @@ function App() {
                     {recomputedRun.adjustmentPerSqm.toFixed(2)} kr / sqm / year
                   </strong>
                 </p>
-                <p className="hint">
-                  Monthly surcharge per unit is calculated as (Δ per sqm × unit
-                  area) / 12. This is the share of the changed public taxes and
-                  fees that is allocated to that unit.
-                </p>
+                <h4 style={{ margin: 0, marginTop: '1rem', marginBottom: '0.25rem', fontWeight: 600 }}>
+                  Expense breakdown
+                </h4>
+                <table className="summary-table">
+                  <thead>
+                    <tr>
+                      <th>Expense name</th>
+                      <th>SKU</th>
+                      <th className="num">
+                        Previous year{' '}
+                        {buildingChargeRows.secondLargestYear ?? '–'}
+                      </th>
+                      <th className="num">
+                        New year {buildingChargeRows.globalMaxYear ?? '–'}
+                      </th>
+                      <th className="num">Difference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {skuSummaries.rows.map((row) => (
+                      <tr key={row.sku}>
+                        <td>{row.labels.join(', ') || '–'}</td>
+                        <td>{row.sku}</td>
+                        <td className="num">
+                          {row.prevYearAmount.toLocaleString('da-DK')} kr / year
+                        </td>
+                        <td className="num">
+                          {row.nextYearAmount.toLocaleString('da-DK')} kr / year
+                        </td>
+                        <td className="num">
+                          {row.diff >= 0 ? '+' : ''}
+                          {row.diff.toLocaleString('da-DK')} kr / year
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td>
+                        <strong>Total</strong>
+                      </td>
+                      <td />
+                      <td className="num">
+                        <strong>
+                          {skuSummaries.totalPrev.toLocaleString('da-DK')} kr / year
+                        </strong>
+                      </td>
+                      <td className="num">
+                        <strong>
+                          {skuSummaries.totalNext.toLocaleString('da-DK')} kr / year
+                        </strong>
+                      </td>
+                      <td className="num">
+                        <strong>
+                          {skuSummaries.totalDiff >= 0 ? '+' : ''}
+                          {skuSummaries.totalDiff.toLocaleString('da-DK')} kr / year
+                        </strong>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
             <div className="grid-2">
               <div className="panel">
                 <h3>Public taxes &amp; fees for this building</h3>
                 <p className="hint">
-                  The system automatically detects which expenses belong to this
-                  regulation run. Rows with the{' '}
-                  <strong>latest year</strong> are treated as the{' '}
-                  <strong>next expense period</strong>, and rows with the{' '}
-                  <strong>second-latest year</strong> are treated as the{' '}
-                  <strong>previous expense period</strong>. Older years are shown
-                  for reference only and are not included in this run.
+                  Felix automatically detects which expenses belong to this
+                  regulation run. Rows with the latest year are treated as the
+                  next expense period, and rows with the second-latest year are
+                  treated as the previous expense period. Previous expenses are
+                  also automatically detected from your previous regulation run.
                 </p>
                 <table className="table">
                   <thead>
@@ -888,8 +1009,8 @@ function App() {
                       <th>Expense name</th>
                       <th>SKU</th>
                       <th>Date</th>
-                      <th>Amount / year</th>
-                      <th>VAT</th>
+                      <th className="num">Amount / year</th>
+                      <th className="num">VAT</th>
                       <th>Documentation</th>
                       <th />
                     </tr>
@@ -946,12 +1067,12 @@ function App() {
                               </span>
                             )}
                           </td>
-                          <td>
+                          <td className="num">
                             <span className={isHistorical ? 'historical-text' : undefined}>
                               {row.amount.toLocaleString('da-DK')} kr
                             </span>
                           </td>
-                          <td>
+                          <td className="num">
                             <span className={isHistorical ? 'historical-text' : undefined}>
                               {charge?.vat !== undefined && charge.vat !== null
                                 ? `${charge.vat.toLocaleString('da-DK')}`
@@ -1044,11 +1165,6 @@ function App() {
                 >
                   Add expense
                 </button>
-                <p className="hint">
-                  Adjust the current annual amounts to run simple what-if
-                  scenarios. The per-unit surcharge and invoices will update
-                  instantly.
-                </p>
               </div>
               <div className="panel">
                 <h3>Key dates</h3>
@@ -1153,27 +1269,63 @@ function App() {
                 <h3>Which charges do you want to regulate?</h3>
                 <p className="hint">
                   Identify invoicing lines that should be regulated by selecting
-                  SKUs.
+                  SKUs. Lines that follow cost regulations of another charge will
+                  automatically be regulated, please do not select those. e.g.
+                  if deposit charge is following cost revisions of rent, you only
+                  need to select rent SKU here.
                 </p>
                 <div className="field">
-                  <label>Select SKU</label>
-                  <select
-                    className="inline-input"
-                    value={selectedSku}
-                    disabled={regulationLocked}
-                    onChange={(e) => setSelectedSku(e.target.value)}
-                  >
-                    {skuOptions.map((sku) => (
-                      <option key={sku.id} value={sku.id}>
-                        {sku.label}
-                      </option>
-                    ))}
-                  </select>
+                  <FormControl fullWidth size="small" disabled={regulationLocked}>
+                    <InputLabel id="sku-select-label">Select SKU</InputLabel>
+                    <Select
+                      labelId="sku-select-label"
+                      label="Select SKU"
+                      multiple
+                      value={selectedSkus}
+                      onChange={(e) =>
+                        setSelectedSkus(e.target.value as string[])
+                      }
+                      renderValue={(selected) => (
+                        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                          {selected.map((id) => {
+                            const sku = skuOptions.find((o) => o.id === id);
+                            return (
+                              <Chip
+                                key={id}
+                                label={sku?.label ?? id}
+                                size="small"
+                                onDelete={
+                                  regulationLocked
+                                    ? undefined
+                                    : () =>
+                                        setSelectedSkus((prev) =>
+                                          prev.filter((x) => x !== id),
+                                        )
+                                }
+                                onMouseDown={(e) => e.stopPropagation()}
+                              />
+                            );
+                          })}
+                        </Box>
+                      )}
+                      displayEmpty
+                    >
+                      {skuOptions.map((sku) => (
+                        <MenuItem key={sku.id} value={sku.id}>
+                          {sku.label}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
                 </div>
                 <div style={{ marginTop: '0.75rem' }}>
                   <h4 style={{ margin: 0, marginBottom: '0.25rem' }}>
                     Included unit types
                   </h4>
+                  <p className="hint">
+                    Excluded unit types will not be used to distribute expenses and
+                    will not receive adjustments, invoices, or notifications.
+                  </p>
                   {unitTypes.map((type) => (
                     <div key={type} className="field checkbox">
                       <label>
@@ -1193,10 +1345,6 @@ function App() {
                       </label>
                     </div>
                   ))}
-                  <p className="hint">
-                    Excluded unit types will not be used to distribute expenses and
-                    will not receive adjustments, invoices, or notifications.
-                  </p>
                 </div>
               </div>
 
@@ -1278,13 +1426,6 @@ function App() {
                   <strong>{formatDate(run.adjustmentStartDate)}</strong>
                 </p>
                 <p>
-                  Undistributed taxes &amp; fees (landlord&apos;s annual
-                  expense):{' '}
-                  <strong>
-                    {totalUndistributedTaxesPerYear.toFixed(0)} kr / year
-                  </strong>
-                </p>
-                <p>
                   Units excluded from calculation:{' '}
                   <strong>
                     {excludedUnitsNames.length > 0
@@ -1292,23 +1433,249 @@ function App() {
                       : 'None'}
                   </strong>
                 </p>
+                {(exclusionRules.length > 0 ||
+                  manuallyExcludedBookingIds.size > 0) && (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <h4
+                      style={{
+                        margin: 0,
+                        marginBottom: '0.25rem',
+                        fontWeight: 600,
+                      }}
+                    >
+                      Excluded bookings
+                    </h4>
+                    {exclusionRules.map((rule) => {
+                      const count = bookings.filter((b) => {
+                        const dateValue =
+                          rule.field === 'leaseEndDate'
+                            ? b.endDate
+                            : rule.field === 'leaseStartDate'
+                            ? b.startDate
+                            : undefined;
+                        if (!dateValue) return false;
+                        return rule.operator === 'isBefore'
+                          ? dateValue < rule.value
+                          : rule.operator === 'isAfter'
+                          ? dateValue > rule.value
+                          : false;
+                      }).length;
+                      return (
+                        <p
+                          key={rule.id}
+                          style={{
+                            margin: '0.15rem 0',
+                          }}
+                        >
+                          {formatRuleLabel(rule)} (Rule):{' '}
+                          <strong>{count} bookings</strong>
+                        </p>
+                      );
+                    })}
+                    {manuallyExcludedCount > 0 && (
+                      <p
+                        style={{
+                          margin: '0.15rem 0',
+                        }}
+                      >
+                        Manually excluded:{' '}
+                        <strong>{manuallyExcludedCount} bookings</strong>
+                      </p>
+                    )}
+                  </div>
+                )}
+                <div
+                  style={{
+                    marginTop: '1rem',
+                    paddingTop: '0.75rem',
+                    borderTop: '1px solid #e5e7eb',
+                  }}
+                >
+                  <h4
+                    style={{
+                      margin: 0,
+                      marginBottom: '0.25rem',
+                      fontWeight: 600,
+                    }}
+                  >
+                    Control totals
+                  </h4>
+                  <table className="control-totals-table">
+                    <tbody>
+                      <tr>
+                        <td>Total adjustment (to tenants)</td>
+                        <td>
+                          {totalAdjustmentDistributed.toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr / year
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>+ Undistributed (exclusions)</td>
+                        <td>
+                          {totalUndistributed.toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr / year
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>+ Undistributed (vacancy)</td>
+                        <td>
+                          {totalVacancyUndistributed.toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr / year
+                        </td>
+                      </tr>
+                      <tr className="control-totals-sum">
+                        <td>= Sum</td>
+                        <td>
+                          {(
+                            totalAdjustmentDistributed +
+                            totalUndistributed +
+                            totalVacancyUndistributed
+                          ).toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr / year
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Difference in expenses</td>
+                        <td>
+                          {recomputedRun.totalDelta.toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr / year
+                        </td>
+                      </tr>
+                      <tr className="control-totals-deviation">
+                        <td>Deviation</td>
+                        <td>
+                          {(
+                            totalAdjustmentDistributed +
+                            totalUndistributed +
+                            totalVacancyUndistributed -
+                            recomputedRun.totalDelta
+                          ).toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr / year
+                          {Math.abs(
+                            totalAdjustmentDistributed +
+                              totalUndistributed +
+                              totalVacancyUndistributed -
+                              recomputedRun.totalDelta,
+                          ) < 0.01 ? (
+                            <span
+                              style={{ color: 'var(--color-success)', marginLeft: '0.5rem' }}
+                            >
+                              ✓ Match
+                            </span>
+                          ) : (
+                            <span
+                              style={{ color: 'var(--color-error)', marginLeft: '0.5rem' }}
+                            >
+                              ✗ Mismatch
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
+            </div>
+
+            {vacancies.length > 0 && (
+              <div style={{ marginBottom: '1.5rem' }}>
+                <h3>Unit vacancies</h3>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Unit</th>
+                      <th className="num">Area (sqm)</th>
+                      <th className="num">Covered months</th>
+                      <th className="num">Vacant months</th>
+                      <th className="num">Undistributed (kr)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vacancies.map((v) => (
+                      <tr key={v.unitId}>
+                        <td>{v.unitName}</td>
+                        <td className="num">{v.areaSqm.toFixed(1)}</td>
+                        <td className="num">{v.coveredMonths.toFixed(1)}</td>
+                        <td className="num">{v.vacantMonths.toFixed(1)}</td>
+                        <td className="num">
+                          {v.undistributedAmount.toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr style={{ fontWeight: 600 }}>
+                      <td>Total</td>
+                      <td className="num"></td>
+                      <td className="num"></td>
+                      <td className="num"></td>
+                      <td className="num">
+                        {totalVacancyUndistributed.toLocaleString('da-DK', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                marginBottom: '0.75rem',
+              }}
+            >
+              <button
+                className="outline-btn"
+                onClick={() => setShowExclusionPopover(true)}
+                disabled={regulationLocked}
+                style={{ position: 'relative', marginTop: 0 }}
+              >
+                Manage exclusion rules
+                {exclusionRules.length > 0 && (
+                  <span className="exclusion-badge">
+                    {exclusionRules.length}
+                  </span>
+                )}
+              </button>
             </div>
             <table className="table">
               <thead>
                 <tr>
                   <th>Tenant</th>
                   <th>Unit</th>
-                  <th>Unit size (sqm)</th>
+                  <th className="num">Unit size (sqm)</th>
                   <th>Lease start</th>
                   <th>Lease end</th>
                   <th>Description</th>
                   <th>Recurring</th>
-                  <th>Current amount</th>
-                  <th>Adjustment amount</th>
-                  <th>New amount</th>
+                  <th className="num">Current amount</th>
+                  <th className="num">Adjustment amount</th>
+                  <th className="num">New amount</th>
+                  <th className="num">Retroactive amount</th>
                   <th>Exclude from application</th>
-                  <th>Retroactive amount</th>
                 </tr>
               </thead>
               <tbody>
@@ -1328,7 +1695,7 @@ function App() {
                     <tr key={row.id}>
                       <td>{row.tenantName}</td>
                       <td>{row.unitName}</td>
-                      <td>{row.areaSqm}</td>
+                      <td className="num">{row.areaSqm}</td>
                       <td>{formatDate(row.leaseStart)}</td>
                       <td>{formatDate(row.leaseEnd)}</td>
                       <td>{row.description}</td>
@@ -1337,57 +1704,72 @@ function App() {
                           {row.recurring ? '✓' : '✕'}
                         </span>
                       </td>
-                      <td>
+                      <td className="num">
                         {row.currentAmount.toLocaleString('da-DK', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{' '}
                         kr
                       </td>
-                      <td>
+                      <td className="num">
                         {row.adjustmentAmount.toLocaleString('da-DK', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{' '}
                         kr
                       </td>
-                      <td>
+                      <td className="num">
                         {row.newAmount.toLocaleString('da-DK', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{' '}
                         kr
                       </td>
-                      <td>
-                        {isRentRow && (
-                          <input
-                            type="checkbox"
-                            checked={setting?.excludeFromApplication ?? false}
-                            disabled={regulationLocked}
-                            onChange={(e) => {
-                              if (regulationLocked) return;
-                              setBookingSettings((prev) =>
-                                prev.map((s) =>
-                                  s.bookingId === row.bookingId &&
-                                  s.regulationRunId === run.id
-                                    ? {
-                                        ...s,
-                                        excludeFromApplication: e.target
-                                          .checked,
-                                      }
-                                    : s,
-                                ),
-                              );
-                            }}
-                          />
-                        )}
-                      </td>
-                      <td>
+                      <td className="num">
                         {isRentRow && invoice && invoice.retroactiveAmount > 0
                           ? `${invoice.retroactiveAmount.toFixed(0)} kr`
                           : isRentRow
                           ? '0 kr'
                           : '–'}
+                      </td>
+                      <td>
+                        {isRentRow && (() => {
+                          const isRuleExcluded = ruleExcludedBookingIds.has(
+                            row.bookingId,
+                          );
+                          return (
+                            <span
+                              title={
+                                isRuleExcluded
+                                  ? 'Excluded by rule'
+                                  : undefined
+                              }
+                            >
+                              <input
+                                type="checkbox"
+                                checked={
+                                  setting?.excludeFromApplication ?? false
+                                }
+                                disabled={
+                                  regulationLocked || isRuleExcluded
+                                }
+                                onChange={(e) => {
+                                  if (regulationLocked) return;
+                                  const checked = e.target.checked;
+                                  setManuallyExcludedBookingIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (checked) {
+                                      next.add(row.bookingId);
+                                    } else {
+                                      next.delete(row.bookingId);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                              />
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );
@@ -1576,10 +1958,10 @@ function App() {
               <thead>
                 <tr>
                   <th>Unit</th>
-                  <th>Area (SQM)</th>
-                  <th>Current rent cost</th>
-                  <th>Adjustment amount</th>
-                  <th>Suggested new rent cost</th>
+                  <th className="num">Area (SQM)</th>
+                  <th className="num">Current rent cost</th>
+                  <th className="num">Adjustment amount</th>
+                  <th className="num">Suggested new rent cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -1603,14 +1985,14 @@ function App() {
                     return (
                       <tr key={unit.id}>
                         <td>{unit.name}</td>
-                        <td>{unit.areaSqm}</td>
-                        <td>
+                        <td className="num">{unit.areaSqm}</td>
+                        <td className="num">
                           {unit.baseMonthlyRent.toLocaleString('da-DK')} kr
                         </td>
-                        <td>
+                        <td className="num">
                           {(suggested - unit.baseMonthlyRent).toFixed(0)} kr
                         </td>
-                        <td>
+                        <td className="num">
                           <input
                             type="number"
                             className="inline-input"
@@ -1642,6 +2024,171 @@ function App() {
                 : 'Apply rent cost changes'}
             </button>
           </section>
+        )}
+
+        {showExclusionPopover && (
+          <div className="dialog-backdrop">
+            <div className="dialog" style={{ maxWidth: '600px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '1rem',
+                }}
+              >
+                <h3 style={{ margin: 0 }}>Exclude bookings where…</h3>
+                <button
+                  className="text-button"
+                  onClick={() => setShowExclusionPopover(false)}
+                  style={{ fontSize: '1.25rem', lineHeight: 1, color: 'var(--color-text-primary)' }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '1.25rem' }}>close</span>
+                </button>
+              </div>
+
+              {!dismissedSuggestion && !exclusionRules.some(
+                (r) =>
+                  r.field === 'leaseEndDate' &&
+                  r.operator === 'isBefore' &&
+                  r.value === run.adjustmentStartDate,
+              ) && (
+                <div className="suggested-rule">
+                  <h4 style={{ margin: 0, marginBottom: '0.5rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <span className="material-symbols-outlined" style={{ fontSize: '1.1rem' }}>lightbulb</span>
+                    Suggested rule
+                  </h4>
+                  <p
+                    style={{
+                      margin: 0,
+                      fontSize: '0.85rem',
+                      marginBottom: '0.5rem',
+                    }}
+                  >
+                    Exclude bookings where lease end
+                    date is before {formatDate(run.adjustmentStartDate)}
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <button
+                      onClick={() => {
+                        setExclusionRules((prev) => [
+                          ...prev,
+                          {
+                            id: `rule-${Date.now()}`,
+                            field: 'leaseEndDate',
+                            operator: 'isBefore',
+                            value: run.adjustmentStartDate,
+                          },
+                        ]);
+                      }}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      className="text-button"
+                      onClick={() => setDismissedSuggestion(true)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginTop: '1rem' }}>
+                {exclusionRules.map((rule) => (
+                  <div key={rule.id} className="exclusion-rule-row">
+                    <select
+                      value={rule.field}
+                      onChange={(e) =>
+                        setExclusionRules((prev) =>
+                          prev.map((r) =>
+                            r.id === rule.id
+                              ? {
+                                  ...r,
+                                  field: e.target
+                                    .value as ExclusionRuleField,
+                                }
+                              : r,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="leaseEndDate">Lease end date</option>
+                      <option value="leaseStartDate">Lease start date</option>
+                    </select>
+                    <select
+                      value={rule.operator}
+                      onChange={(e) =>
+                        setExclusionRules((prev) =>
+                          prev.map((r) =>
+                            r.id === rule.id
+                              ? {
+                                  ...r,
+                                  operator: e.target
+                                    .value as ExclusionRuleOperator,
+                                }
+                              : r,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="isBefore">is before</option>
+                      <option value="isAfter">is after</option>
+                    </select>
+                    <input
+                      type="date"
+                      value={rule.value}
+                      onChange={(e) =>
+                        setExclusionRules((prev) =>
+                          prev.map((r) =>
+                            r.id === rule.id
+                              ? { ...r, value: e.target.value }
+                              : r,
+                          ),
+                        )
+                      }
+                    />
+                    <button
+                      className="rule-delete-btn"
+                      onClick={() =>
+                        setExclusionRules((prev) =>
+                          prev.filter((r) => r.id !== rule.id),
+                        )
+                      }
+                    >
+                      🗑
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.75rem' }}>
+                <button
+                  className="outline-btn"
+                  style={{ marginTop: 0 }}
+                  onClick={() =>
+                    setExclusionRules((prev) => [
+                      ...prev,
+                      {
+                        id: `rule-${Date.now()}`,
+                        field: 'leaseEndDate',
+                        operator: 'isBefore',
+                        value: new Date().toISOString().slice(0, 10),
+                      },
+                    ])
+                  }
+                >
+                  + Add rule
+                </button>
+                <button
+                  className="text-button"
+                  onClick={() => setShowExclusionPopover(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {showExpenseModal && (
