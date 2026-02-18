@@ -7,13 +7,15 @@ export interface Building {
   unitIds: string[];
 }
 
+export type UnitType = 'apartment' | 'shared' | 'commercial' | 'parking_space' | 'tenant_hotel' | 'storage_room';
+
 export interface Unit {
   id: string;
   buildingId: string;
   name: string;
   areaSqm: number;
   baseMonthlyRent: number;
-  unitType: 'apartment' | 'shared' | 'commercial';
+  unitType: UnitType;
 }
 
 export interface Tenant {

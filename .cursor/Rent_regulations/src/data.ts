@@ -51,6 +51,9 @@ export const buildings: Building[] = [
       'u32',
       'u33',
       'u34',
+      'u35',
+      'u36',
+      'u37',
     ],
   },
 ];
@@ -328,6 +331,30 @@ export const units: Unit[] = [
     baseMonthlyRent: 6700,
     unitType: 'apartment',
   },
+  {
+    id: 'u35',
+    buildingId: 'b1',
+    name: 'P1',
+    areaSqm: 12,
+    baseMonthlyRent: 500,
+    unitType: 'parking_space',
+  },
+  {
+    id: 'u36',
+    buildingId: 'b1',
+    name: 'Hotel room 1',
+    areaSqm: 25,
+    baseMonthlyRent: 4500,
+    unitType: 'tenant_hotel',
+  },
+  {
+    id: 'u37',
+    buildingId: 'b1',
+    name: 'Storage 1',
+    areaSqm: 8,
+    baseMonthlyRent: 300,
+    unitType: 'storage_room',
+  },
 ];
 
 export const tenants: Tenant[] = [
@@ -365,6 +392,9 @@ export const tenants: Tenant[] = [
   { id: 't32', name: 'Signe Villadsen' },
   { id: 't33', name: 'Victor Broberg' },
   { id: 't34', name: 'Sara Leth' },
+  { id: 't35', name: 'Parking User' },
+  { id: 't36', name: 'Hotel Guest' },
+  { id: 't37', name: 'Storage Renter' },
 ];
 
 export const bookings: Booking[] = [
@@ -614,6 +644,27 @@ export const bookings: Booking[] = [
     tenantId: 't34',
     startDate: '2024-09-01',
     monthlyRent: 6700,
+  },
+  {
+    id: 'bk35',
+    unitId: 'u35',
+    tenantId: 't35',
+    startDate: '2023-01-01',
+    monthlyRent: 500,
+  },
+  {
+    id: 'bk36',
+    unitId: 'u36',
+    tenantId: 't36',
+    startDate: '2024-06-01',
+    monthlyRent: 4500,
+  },
+  {
+    id: 'bk37',
+    unitId: 'u37',
+    tenantId: 't37',
+    startDate: '2022-03-01',
+    monthlyRent: 300,
   },
 ];
 

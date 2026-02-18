@@ -278,6 +278,10 @@ h3 {
   background: #f9fafb;
 }
 
+.table .row-excluded {
+  color: var(--color-text-secondary);
+}
+
 .historical-text {
   color: var(--color-text-disabled);
 }
@@ -457,11 +461,30 @@ input[type='checkbox'] {
   background: none;
 }
 
+.link-like {
+  color: var(--color-primary);
+  cursor: default;
+}
+
 .outline-btn {
   margin-top: 16px;
-  background: var(--color-bg-paper);
+  background: transparent;
   color: var(--color-primary);
   border: 1px solid var(--color-primary);
+}
+
+.button-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+
+.button-row .primary-btn,
+.button-row .outline-btn {
+  margin-top: 0;
 }
 
 .outline-btn:hover {
@@ -581,4 +604,15 @@ input[type='checkbox'] {
 .control-totals-table .control-totals-deviation td {
   border-top: 1px solid var(--color-divider);
   padding-top: 0.35rem;
+}
+
+.input-error {
+  border-color: var(--color-error) !important;
+  outline-color: var(--color-error);
+}
+
+.field-error {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: var(--color-error-text);
 }

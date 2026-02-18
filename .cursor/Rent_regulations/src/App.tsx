@@ -28,13 +28,17 @@ import type {
   RegulationRun,
   RegulationUnitSetting,
   RegulationBookingSetting,
-  Unit as UnitModel,
+  UnitType,
   ExclusionRule,
   ExclusionRuleField,
   ExclusionRuleOperator,
 } from './models';
 
-type Tab = 'buildings' | 'regulation' | 'invoices' | 'notifications' | 'templates';
+// Feature flags: set to true to show these sections
+const SHOW_CONTROL_TOTALS = false;
+const SHOW_UNIT_VACANCIES = false;
+
+type Tab = 'buildings' | 'regulation' | 'invoices';
 
 type DistributionRow = {
   id: string;
@@ -65,25 +69,26 @@ function App() {
   >(initialRegulationBookingSettings);
   const [charges, setCharges] = useState(publicCharges);
   const [autoApproveInvoices, setAutoApproveInvoices] = useState(false);
-  const [templateOverrides, setTemplateOverrides] = useState<
-    Record<string, number | undefined>
-  >({});
   const [chargeYearSort] = useState<'asc' | 'desc'>('asc');
   const [periodSort, setPeriodSort] = useState<'asc' | 'desc'>('desc');
   const [exclusionRules, setExclusionRules] = useState<ExclusionRule[]>([]);
   const [showExclusionPopover, setShowExclusionPopover] = useState(false);
   const [manuallyExcludedBookingIds, setManuallyExcludedBookingIds] = useState<Set<string>>(new Set());
   const [dismissedSuggestion, setDismissedSuggestion] = useState(false);
+  const [vacancyPanelExpanded, setVacancyPanelExpanded] = useState(false);
+  const [controlTotalsExpanded, setControlTotalsExpanded] = useState(true);
+  const [setupValidationErrors, setSetupValidationErrors] = useState<{
+    notificationDate?: string;
+    adjustmentStartDate?: string;
+    invoicingEntity?: string;
+    invoicingProducts?: string;
+  }>({});
+  const [showNotificationLetterModal, setShowNotificationLetterModal] =
+    useState(false);
 
   const skuOptions = [
     { id: '2001', label: '2001 – Base rent' },
-    { id: '2002', label: '2002 – Utilities' },
-    { id: '2003', label: '2003 – Deposit' },
-    { id: '2004', label: '2004 – Prepaid rent' },
-    { id: '2005', label: '2005 – Parking' },
     { id: '3001', label: '3001 – Base rent (Commercial)' },
-    { id: '2006', label: '2006 – Storage' },
-    { id: '2007', label: '2007 – Service charges' },
   ];
   const expenseSkuOptions = [
     { id: '1001', label: '1001 – Property taxes' },
@@ -234,13 +239,25 @@ function App() {
     invoicingEntities[0],
   );
 
-  const unitTypes: UnitModel['unitType'][] = ['apartment', 'shared', 'commercial'];
+  const unitTypes: UnitType[] = ['apartment', 'shared', 'commercial', 'parking_space', 'tenant_hotel', 'storage_room'];
+  const formatUnitTypeLabel = (type: UnitType) => {
+    if (type === 'apartment') return 'Apartments';
+    if (type === 'shared') return 'Shared apartments';
+    if (type === 'commercial') return 'Commercial units';
+    if (type === 'parking_space') return 'Parking spaces';
+    if (type === 'tenant_hotel') return 'Tenant hotel';
+    if (type === 'storage_room') return 'Storage room';
+    return type;
+  };
   const [includedTypes, setIncludedTypes] = useState<
-    Record<UnitModel['unitType'], boolean>
+    Record<UnitType, boolean>
   >({
     apartment: true,
     shared: true,
     commercial: true,
+    parking_space: true,
+    tenant_hotel: true,
+    storage_room: true,
   });
 
   const building = useMemo(
@@ -498,6 +515,73 @@ function App() {
     [vacancies],
   );
 
+  // Adjustment month totals: rent adjusted, vacancy and exclusions undistributed on the adjustment date
+  const {
+    rentAdjustedOnAdjustmentDate,
+    vacancyUndistributedOnAdjustmentDate,
+    exclusionUndistributedOnAdjustmentDate,
+  } = useMemo(() => {
+    const adjDate = new Date(run.adjustmentStartDate + 'T00:00:00');
+    if (Number.isNaN(adjDate.getTime())) {
+      return {
+        rentAdjustedOnAdjustmentDate: 0,
+        vacancyUndistributedOnAdjustmentDate: 0,
+        exclusionUndistributedOnAdjustmentDate: 0,
+      };
+    }
+    const adjDateIso = run.adjustmentStartDate;
+
+    const buildingUnits = units.filter((u) => u.buildingId === building.id);
+    let rentAdjusted = 0;
+    let vacancyUndistributed = 0;
+    let exclusionUndistributed = 0;
+
+    for (const unit of buildingUnits) {
+      const unitSetting = unitSettings.find(
+        (s) => s.unitId === unit.id && s.regulationRunId === run.id,
+      );
+      if (unitSetting?.excludeFromCalculation) continue;
+
+      const monthlyAdjustment = (recomputedRun.adjustmentPerSqm * unit.areaSqm) / 12;
+      const unitBookings = bookings.filter((b) => b.unitId === unit.id);
+      const bookingCoveringAdjDate = unitBookings.find((b) => {
+        if (b.startDate > adjDateIso) return false;
+        if (!b.endDate) return true;
+        return b.endDate >= adjDateIso;
+      });
+
+      if (!bookingCoveringAdjDate) {
+        vacancyUndistributed += monthlyAdjustment;
+      } else {
+        const isExcluded = bookingSettings.some(
+          (s) =>
+            s.bookingId === bookingCoveringAdjDate.id &&
+            s.regulationRunId === run.id &&
+            s.excludeFromApplication === true,
+        );
+        if (isExcluded) {
+          exclusionUndistributed += monthlyAdjustment;
+        } else {
+          rentAdjusted += monthlyAdjustment;
+        }
+      }
+    }
+
+    return {
+      rentAdjustedOnAdjustmentDate: rentAdjusted,
+      vacancyUndistributedOnAdjustmentDate: vacancyUndistributed,
+      exclusionUndistributedOnAdjustmentDate: exclusionUndistributed,
+    };
+  }, [
+      run,
+      building,
+      units,
+      bookings,
+      unitSettings,
+      bookingSettings,
+      recomputedRun,
+    ]);
+
   const ruleExcludedBookingIds = useMemo(() => {
     const excluded = new Map<string, string[]>();
     for (const rule of exclusionRules) {
@@ -556,21 +640,21 @@ function App() {
     return `${fieldLabel} ${opLabel} ${formatDate(rule.value)}`;
   };
 
-  const excludedUnitsNames = useMemo(
-    () =>
-      units
-        .filter((u) => u.buildingId === building.id)
-        .filter((u) =>
-          unitSettings.some(
+  const includedUnitTypes = useMemo(() => {
+    const included = units
+      .filter((u) => u.buildingId === building.id)
+      .filter(
+        (u) =>
+          !unitSettings.some(
             (s) =>
               s.unitId === u.id &&
               s.regulationRunId === run.id &&
               s.excludeFromCalculation,
           ),
-        )
-        .map((u) => u.name),
-    [units, building.id, unitSettings, run.id],
-  );
+      );
+    const types = [...new Set(included.map((u) => u.unitType))];
+    return types.map((t) => formatUnitTypeLabel(t));
+  }, [units, building.id, unitSettings, run.id]);
 
   const invoicePreviews = useMemo(
     () => buildInvoicePreviews(bookings, units, tenants, bookingResults),
@@ -629,14 +713,40 @@ function App() {
     [invoicePreviews, units, building.id],
   );
 
+  const unitsIncludedCount = useMemo(() => {
+    const buildingUnits = units.filter((u) => u.buildingId === building.id);
+    return buildingUnits.filter((u) => {
+      const setting = unitSettings.find(
+        (s) => s.unitId === u.id && s.regulationRunId === run.id,
+      );
+      return !setting?.excludeFromCalculation;
+    }).length;
+  }, [units, building.id, unitSettings, run.id]);
+
+  const bookingsIncludedCount = useMemo(() => {
+    return bookingResults.filter((r) => {
+      if (!r.included) return false;
+      const setting = bookingSettings.find(
+        (s) => s.bookingId === r.bookingId && s.regulationRunId === run.id,
+      );
+      return setting?.excludeFromApplication !== true;
+    }).length;
+  }, [bookingResults, bookingSettings, run.id]);
+
+  const invoicingLinesCount = useMemo(() => {
+    return invoicePreviews.reduce((count, inv) => {
+      let lines = 0;
+      if (Math.abs(inv.monthlyAdjustment) > 0.001) lines += 3;
+      if (inv.retroactiveAmount > 0.001) lines += 1;
+      return count + lines;
+    }, 0);
+  }, [invoicePreviews]);
+
   const [isRunningRegulation, setIsRunningRegulation] = useState(false);
   const [regulationCompleted, setRegulationCompleted] = useState(false);
   const [regulationLocked, setRegulationLocked] = useState(false);
-  const [costLocked, setCostLocked] = useState(false);
   const [showRunSuccess, setShowRunSuccess] = useState(false);
   const [showDistributionSuccess, setShowDistributionSuccess] = useState(false);
-  const [isApplyingCostChanges, setIsApplyingCostChanges] = useState(false);
-  const [showCostSuccess, setShowCostSuccess] = useState(false);
 
   const handleRunRegulationFromInvoices = () => {
     if (isRunningRegulation || regulationCompleted) {
@@ -654,22 +764,6 @@ function App() {
       setTimeout(() => {
         setShowRunSuccess(false);
         setShowDistributionSuccess(false);
-      }, 2000);
-    }, 800);
-  };
-
-  const handleApplyCostChanges = () => {
-    if (isApplyingCostChanges || costLocked) {
-      return;
-    }
-    setIsApplyingCostChanges(true);
-    setTimeout(() => {
-      setIsApplyingCostChanges(false);
-      setShowCostSuccess(true);
-      setCostLocked(true);
-
-      setTimeout(() => {
-        setShowCostSuccess(false);
       }, 2000);
     }, 800);
   };
@@ -702,15 +796,31 @@ function App() {
     return `${day}-${month}-${year}`;
   };
 
-  const formatUnitTypeLabel = (type: UnitModel['unitType']) => {
-    if (type === 'apartment') return 'Apartments';
-    if (type === 'shared') return 'Shared apartments';
-    if (type === 'commercial') return 'Commercial units';
-    return type;
-  };
-
   const handleStartRegulation = () => {
     setActiveTab('regulation');
+  };
+
+  const validateSetup = () => {
+    const errors: Record<string, string> = {};
+    if (!run.notificationDate?.trim()) errors.notificationDate = 'Notification date is required';
+    if (!run.adjustmentStartDate?.trim()) errors.adjustmentStartDate = 'Adjustment date is required';
+    if (!selectedInvoicingEntity?.trim()) errors.invoicingEntity = 'Invoicing entity is required';
+    if (selectedSkus.length < 1) errors.invoicingProducts = 'Select at least one invoicing product';
+    return errors;
+  };
+
+  const handleCalculateDistribution = () => {
+    if (regulationLocked) {
+      setActiveTab('invoices');
+      return;
+    }
+    const errors = validateSetup();
+    if (Object.keys(errors).length > 0) {
+      setSetupValidationErrors(errors);
+      return;
+    }
+    setSetupValidationErrors({});
+    setActiveTab('invoices');
   };
 
   return (
@@ -743,8 +853,6 @@ function App() {
                 const stepTabs = [
                   { id: 'regulation' as const, label: 'Setup', step: 1 },
                   { id: 'invoices' as const, label: 'Distribution', step: 2 },
-                  { id: 'notifications' as const, label: 'Notification letters', step: 3 },
-                  { id: 'templates' as const, label: 'Cost adjustments', step: 4 },
                 ];
                 const currentStepIndex = stepTabs.findIndex((s) => s.id === activeTab);
                 return stepTabs.flatMap((stepConfig, index) => {
@@ -752,9 +860,7 @@ function App() {
                   const isCompleted =
                     currentStepIndex !== -1 && currentStepIndex > index;
                   const isStepLocked =
-                    (stepConfig.id === 'regulation' || stepConfig.id === 'invoices') ? regulationLocked :
-                    stepConfig.id === 'templates' ? costLocked :
-                    false;
+                    (stepConfig.id === 'regulation' || stepConfig.id === 'invoices') ? regulationLocked : false;
                   const stepClass = [
                     'nav-btn',
                     'wizard-step',
@@ -1169,21 +1275,28 @@ function App() {
               <div className="panel">
                 <h3>Key dates</h3>
                 <div className="field">
-                  <label>Notification date</label>
+                  <label>Notification date *</label>
                   <input
                     type="date"
+                    className={setupValidationErrors.notificationDate ? 'input-error' : ''}
                     value={run.notificationDate}
-                    onChange={(e) =>
-                      setRun({ ...run, notificationDate: e.target.value })
-                    }
+                    onChange={(e) => {
+                      setSetupValidationErrors((prev) => ({ ...prev, notificationDate: undefined }));
+                      setRun({ ...run, notificationDate: e.target.value });
+                    }}
                   />
+                  {setupValidationErrors.notificationDate && (
+                    <p className="field-error">{setupValidationErrors.notificationDate}</p>
+                  )}
                 </div>
                 <div className="field">
-                  <label>Adjustment start date</label>
+                  <label>Adjustment date *</label>
                   <input
                     type="date"
+                    className={setupValidationErrors.adjustmentStartDate ? 'input-error' : ''}
                     value={run.adjustmentStartDate}
                     onChange={(e) => {
+                      setSetupValidationErrors((prev) => ({ ...prev, adjustmentStartDate: undefined }));
                       const nextDate = e.target.value;
                       let nextRun: RegulationRun = {
                         ...run,
@@ -1199,6 +1312,9 @@ function App() {
                       setRun(nextRun);
                     }}
                   />
+                  {setupValidationErrors.adjustmentStartDate && (
+                    <p className="field-error">{setupValidationErrors.adjustmentStartDate}</p>
+                  )}
                 </div>
                 <div className="field checkbox">
                   <label>
@@ -1268,23 +1384,44 @@ function App() {
               <div className="panel" style={{ marginBottom: '0.75rem' }}>
                 <h3>Which charges do you want to regulate?</h3>
                 <p className="hint">
-                  Identify invoicing lines that should be regulated by selecting
-                  SKUs. Lines that follow cost regulations of another charge will
-                  automatically be regulated, please do not select those. e.g.
-                  if deposit charge is following cost revisions of rent, you only
-                  need to select rent SKU here.
+                  Identify invoicing products that should be regulated. Deposit
+                  and prepaid rent that are set to follow rent cost revisions
+                  will be regulated automatically, so you only need to select
+                  rent products here.
                 </p>
                 <div className="field">
-                  <FormControl fullWidth size="small" disabled={regulationLocked}>
-                    <InputLabel id="sku-select-label">Select SKU</InputLabel>
+                  <label>Invoicing entity *</label>
+                  <select
+                    className={`inline-input${setupValidationErrors.invoicingEntity ? ' input-error' : ''}`}
+                    value={selectedInvoicingEntity}
+                    disabled={regulationLocked}
+                    onChange={(e) => {
+                      setSetupValidationErrors((prev) => ({ ...prev, invoicingEntity: undefined }));
+                      setSelectedInvoicingEntity(e.target.value);
+                    }}
+                  >
+                    {invoicingEntities.map((entity) => (
+                      <option key={entity} value={entity}>
+                        {entity}
+                      </option>
+                    ))}
+                  </select>
+                  {setupValidationErrors.invoicingEntity && (
+                    <p className="field-error">{setupValidationErrors.invoicingEntity}</p>
+                  )}
+                </div>
+                <div className="field">
+                  <FormControl fullWidth size="small" disabled={regulationLocked} error={!!setupValidationErrors.invoicingProducts}>
+                    <InputLabel id="sku-select-label">Invoicing products *</InputLabel>
                     <Select
                       labelId="sku-select-label"
-                      label="Select SKU"
+                      label="Invoicing products *"
                       multiple
                       value={selectedSkus}
-                      onChange={(e) =>
-                        setSelectedSkus(e.target.value as string[])
-                      }
+                      onChange={(e) => {
+                        setSetupValidationErrors((prev) => ({ ...prev, invoicingProducts: undefined }));
+                        setSelectedSkus(e.target.value as string[]);
+                      }}
                       renderValue={(selected) => (
                         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
                           {selected.map((id) => {
@@ -1317,89 +1454,64 @@ function App() {
                       ))}
                     </Select>
                   </FormControl>
-                </div>
-                <div style={{ marginTop: '0.75rem' }}>
-                  <h4 style={{ margin: 0, marginBottom: '0.25rem' }}>
-                    Included unit types
-                  </h4>
-                  <p className="hint">
-                    Excluded unit types will not be used to distribute expenses and
-                    will not receive adjustments, invoices, or notifications.
-                  </p>
-                  {unitTypes.map((type) => (
-                    <div key={type} className="field checkbox">
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={includedTypes[type] ?? true}
-                          disabled={regulationLocked}
-                          onChange={(e) => {
-                            if (regulationLocked) return;
-                            setIncludedTypes((prev) => ({
-                              ...prev,
-                              [type]: e.target.checked,
-                            }));
-                          }}
-                        />
-                        {formatUnitTypeLabel(type)}
-                      </label>
-                    </div>
-                  ))}
+                  {setupValidationErrors.invoicingProducts && (
+                    <p className="field-error">{setupValidationErrors.invoicingProducts}</p>
+                  )}
                 </div>
               </div>
-
               <div className="panel" style={{ marginBottom: '0.75rem' }}>
-                <h3>New invoicing lines setup</h3>
-                <div className="field">
-                  <label>Invoicing entity</label>
-                  <select
-                    className="inline-input"
-                    value={selectedInvoicingEntity}
-                    disabled={regulationLocked}
-                    onChange={(e) => setSelectedInvoicingEntity(e.target.value)}
-                  >
-                    {invoicingEntities.map((entity) => (
-                      <option key={entity} value={entity}>
-                        {entity}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <h3>Included unit types</h3>
+                <p className="hint">
+                  Excluded unit types will not be used to distribute expenses and
+                  will not receive adjustments, invoices, or notifications.
+                </p>
+                {unitTypes.map((type) => (
+                  <div key={type} className="field checkbox">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={includedTypes[type] ?? true}
+                        disabled={regulationLocked}
+                        onChange={(e) => {
+                          if (regulationLocked) return;
+                          setIncludedTypes((prev) => ({
+                            ...prev,
+                            [type]: e.target.checked,
+                          }));
+                        }}
+                      />
+                      {formatUnitTypeLabel(type)}
+                    </label>
+                  </div>
+                ))}
               </div>
             </div>
-            <div style={{ marginTop: '1rem', textAlign: 'left' }}>
-              <div
-                style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}
+            <div className="button-row" style={{ textAlign: 'left' }}>
+              <button
+                className={`primary-btn${
+                  showDistributionSuccess ? ' success' : ''
+                }`}
+                onClick={handleCalculateDistribution}
+                disabled={regulationLocked && !showDistributionSuccess}
               >
+                {regulationLocked
+                  ? '✓ Distribution calculated'
+                  : 'Calculate distribution per booking'}
+              </button>
+              {regulationLocked && (
                 <button
-                  className={`primary-btn${
-                    showDistributionSuccess ? ' success' : ''
-                  }`}
-                  onClick={() => setActiveTab('invoices')}
-                  disabled={regulationLocked && !showDistributionSuccess}
+                  className="primary-btn"
+                  onClick={() => {
+                    setRegulationLocked(false);
+                    setRegulationCompleted(false);
+                    setIsRunningRegulation(false);
+                    setShowRunSuccess(false);
+                    setShowDistributionSuccess(false);
+                  }}
                 >
-                  {regulationLocked
-                    ? '✓ Distribution calculated'
-                    : 'Calculate distribution per booking'}
+                  Reopen and re-run regulation
                 </button>
-                {regulationLocked && (
-                  <button
-                    className="primary-btn"
-                    onClick={() => {
-                      setRegulationLocked(false);
-                      setRegulationCompleted(false);
-                      setIsRunningRegulation(false);
-                      setShowRunSuccess(false);
-                      setShowDistributionSuccess(false);
-                      setIsApplyingCostChanges(false);
-                      setShowCostSuccess(false);
-                      setCostLocked(false);
-                    }}
-                  >
-                    Reopen setup and re-run regulation
-                  </button>
-                )}
-              </div>
+              )}
             </div>
           </section>
         )}
@@ -1426,10 +1538,10 @@ function App() {
                   <strong>{formatDate(run.adjustmentStartDate)}</strong>
                 </p>
                 <p>
-                  Units excluded from calculation:{' '}
+                  Unit types included in calculation:{' '}
                   <strong>
-                    {excludedUnitsNames.length > 0
-                      ? excludedUnitsNames.join(', ')
+                    {includedUnitTypes.length > 0
+                      ? includedUnitTypes.join(', ')
                       : 'None'}
                   </strong>
                 </p>
@@ -1488,18 +1600,162 @@ function App() {
                   style={{
                     marginTop: '1rem',
                     paddingTop: '0.75rem',
-                    borderTop: '1px solid #e5e7eb',
+                    borderTop: '1px solid var(--color-divider)',
                   }}
                 >
-                  <h4
+                  <h4 style={{ margin: 0, marginBottom: '0.25rem', fontWeight: 600 }}>
+                    Yearly rent increase projection (based on{' '}
+                    {formatDate(run.adjustmentStartDate)})
+                  </h4>
+                  <table className="control-totals-table">
+                    <tbody>
+                      <tr>
+                        <td>Total yearly rent increase projection</td>
+                        <td>
+                          {(rentAdjustedOnAdjustmentDate * 12).toLocaleString(
+                            'da-DK',
+                            {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            },
+                          )}{' '}
+                          kr
+                        </td>
+                      </tr>
+                      {vacancyUndistributedOnAdjustmentDate > 0 && (
+                        <tr>
+                          <td>Undistributed (due to vacancy)</td>
+                          <td>
+                            {(
+                              vacancyUndistributedOnAdjustmentDate * 12
+                            ).toLocaleString('da-DK', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            kr
+                          </td>
+                        </tr>
+                      )}
+                      {exclusionUndistributedOnAdjustmentDate > 0 && (
+                        <tr>
+                          <td>Undistributed (due to excluded bookings)</td>
+                          <td>
+                            {(
+                              exclusionUndistributedOnAdjustmentDate * 12
+                            ).toLocaleString('da-DK', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            kr
+                          </td>
+                        </tr>
+                      )}
+                      <tr className="control-totals-sum">
+                        <td>= Sum</td>
+                        <td>
+                          {(
+                            (rentAdjustedOnAdjustmentDate +
+                              vacancyUndistributedOnAdjustmentDate +
+                              exclusionUndistributedOnAdjustmentDate) *
+                            12
+                          ).toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Difference in expenses</td>
+                        <td>
+                          {recomputedRun.totalDelta.toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr
+                        </td>
+                      </tr>
+                      <tr className="control-totals-deviation">
+                        <td>Deviation</td>
+                        <td>
+                          {(
+                            (rentAdjustedOnAdjustmentDate +
+                              vacancyUndistributedOnAdjustmentDate +
+                              exclusionUndistributedOnAdjustmentDate) *
+                              12 -
+                            recomputedRun.totalDelta
+                          ).toLocaleString('da-DK', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          kr
+                          {Math.abs(
+                            (rentAdjustedOnAdjustmentDate +
+                              vacancyUndistributedOnAdjustmentDate +
+                              exclusionUndistributedOnAdjustmentDate) *
+                              12 -
+                              recomputedRun.totalDelta,
+                          ) < 0.01 ? (
+                            <span
+                              style={{
+                                color: 'var(--color-success)',
+                                marginLeft: '0.5rem',
+                              }}
+                            >
+                              ✓ Match
+                            </span>
+                          ) : (
+                            <span
+                              style={{
+                                color: 'var(--color-error)',
+                                marginLeft: '0.5rem',
+                              }}
+                            >
+                              ✗ Mismatch
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {SHOW_CONTROL_TOTALS && (
+                <div
+                  style={{
+                    marginTop: '1rem',
+                    paddingTop: '0.75rem',
+                    borderTop: '1px solid var(--color-divider)',
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => setControlTotalsExpanded((e) => !e)}
                     style={{
-                      margin: 0,
-                      marginBottom: '0.25rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      padding: 0,
+                      marginBottom: controlTotalsExpanded ? '0.25rem' : 0,
+                      fontSize: '1rem',
                       fontWeight: 600,
+                      color: 'var(--color-text-primary)',
                     }}
                   >
+                    <span
+                      className="material-symbols-outlined"
+                      style={{
+                        fontSize: '1.25rem',
+                        transform: controlTotalsExpanded ? 'rotate(180deg)' : 'none',
+                        transition: 'transform 0.2s',
+                        color: 'var(--color-text-primary)',
+                      }}
+                    >
+                      expand_more
+                    </span>
                     Control totals
-                  </h4>
+                  </button>
+                  {controlTotalsExpanded && (
                   <table className="control-totals-table">
                     <tbody>
                       <tr>
@@ -1591,30 +1847,60 @@ function App() {
                       </tr>
                     </tbody>
                   </table>
+                  )}
                 </div>
+                )}
               </div>
             </div>
 
-            {vacancies.length > 0 && (
-              <div style={{ marginBottom: '1.5rem' }}>
-                <h3>Unit vacancies</h3>
+            {SHOW_UNIT_VACANCIES && vacancies.length > 0 && (
+              <div style={{ marginBottom: '1.5rem' }} className="panel">
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setVacancyPanelExpanded((e) => !e)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    padding: 0,
+                    marginBottom: vacancyPanelExpanded ? '0.75rem' : 0,
+                    fontSize: '1rem',
+                    fontWeight: 600,
+                    color: 'var(--color-text-primary)',
+                  }}
+                >
+                  <span
+                    className="material-symbols-outlined"
+                    style={{
+                      fontSize: '1.25rem',
+                      transform: vacancyPanelExpanded ? 'rotate(180deg)' : 'none',
+                      transition: 'transform 0.2s',
+                      color: 'var(--color-text-primary)',
+                    }}
+                  >
+                    expand_more
+                  </span>
+                  Unit vacancies ({vacancies.length} unit{vacancies.length !== 1 ? 's' : ''})
+                </button>
+                {vacancyPanelExpanded && (
                 <table className="table">
                   <thead>
                     <tr>
                       <th>Unit</th>
                       <th className="num">Area (sqm)</th>
-                      <th className="num">Covered months</th>
-                      <th className="num">Vacant months</th>
+                      <th className="num">Covered days</th>
+                      <th className="num">Vacant days</th>
                       <th className="num">Undistributed (kr)</th>
                     </tr>
                   </thead>
                   <tbody>
                     {vacancies.map((v) => (
                       <tr key={v.unitId}>
-                        <td>{v.unitName}</td>
+                        <td><span className="link-like">{v.unitName}</span></td>
                         <td className="num">{v.areaSqm.toFixed(1)}</td>
-                        <td className="num">{v.coveredMonths.toFixed(1)}</td>
-                        <td className="num">{v.vacantMonths.toFixed(1)}</td>
+                        <td className="num">{(v.coveredMonths * (365 / 12)).toFixed(0)}</td>
+                        <td className="num">{(v.vacantMonths * (365 / 12)).toFixed(0)}</td>
                         <td className="num">
                           {v.undistributedAmount.toLocaleString('da-DK', {
                             minimumFractionDigits: 2,
@@ -1637,6 +1923,7 @@ function App() {
                     </tr>
                   </tbody>
                 </table>
+                )}
               </div>
             )}
 
@@ -1692,8 +1979,11 @@ function App() {
                   );
 
                   return (
-                    <tr key={row.id}>
-                      <td>{row.tenantName}</td>
+                    <tr
+                      key={row.id}
+                      className={setting?.excludeFromApplication ? 'row-excluded' : undefined}
+                    >
+                      <td><span className="link-like">{row.tenantName}</span></td>
                       <td>{row.unitName}</td>
                       <td className="num">{row.areaSqm}</td>
                       <td>{formatDate(row.leaseStart)}</td>
@@ -1777,6 +2067,41 @@ function App() {
               </tbody>
             </table>
             <div className="panel" style={{ marginTop: '1rem' }}>
+              <div style={{ marginBottom: '1rem' }}>
+                <h4
+                  style={{
+                    margin: 0,
+                    marginBottom: '0.25rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  Invoicing summary
+                </h4>
+                <table className="control-totals-table">
+                  <tbody>
+                    <tr>
+                      <td>No. of units included in rent regulation</td>
+                      <td>{unitsIncludedCount}</td>
+                    </tr>
+                    <tr>
+                      <td>No. of bookings included in regulation</td>
+                      <td>{bookingsIncludedCount}</td>
+                    </tr>
+                    <tr>
+                      <td>No. of new invoicing lines due on {formatDate(run.adjustmentStartDate)}</td>
+                      <td>{invoicingLinesCount}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => setShowNotificationLetterModal(true)}
+                style={{ marginBottom: '1rem' }}
+              >
+                Preview notification letter example
+              </button>
               <div className="field checkbox">
                 <label>
                   <input
@@ -1788,242 +2113,211 @@ function App() {
                   Automatically approve new invoicing lines
                 </label>
               </div>
-              <button
-                className={`primary-btn${showRunSuccess ? ' success' : ''}`}
-                onClick={handleRunRegulationFromInvoices}
-                disabled={
-                  isRunningRegulation ||
-                  (regulationCompleted && !showRunSuccess)
-                }
-              >
-                {isRunningRegulation
-                  ? 'Running rent regulation…'
-                  : regulationCompleted
-                  ? '✓ Rent regulation completed'
-                  : 'Run rent regulation'}
-              </button>
+              <div className="button-row">
+                <button
+                  className={`primary-btn${showRunSuccess ? ' success' : ''}`}
+                  onClick={handleRunRegulationFromInvoices}
+                  disabled={
+                    isRunningRegulation ||
+                    (regulationCompleted && !showRunSuccess)
+                  }
+                >
+                  {isRunningRegulation
+                    ? 'Running rent regulation…'
+                    : regulationCompleted
+                    ? '✓ Rent regulation completed'
+                    : 'Run rent regulation'}
+                </button>
+                {regulationCompleted && (
+                  <button
+                    className="outline-btn"
+                    onClick={() => {
+                      setRegulationLocked(false);
+                      setRegulationCompleted(false);
+                      setIsRunningRegulation(false);
+                      setShowRunSuccess(false);
+                      setShowDistributionSuccess(false);
+                    }}
+                  >
+                    Reopen and re-run regulation
+                  </button>
+                )}
+              </div>
             </div>
           </section>
         )}
 
-        {activeTab === 'notifications' && (
-          <section>
-            <p className="hint">
-              You are previewing a single example of the tenant notification
-              letter. Each tenant will receive their individual notification on{' '}
-              {formatDate(run.notificationDate)}. Tenants excluded from application
-              will not receive any notification letter.
-            </p>
-            {(() => {
-              const exampleInvoice = invoicePreviews.find((inv) =>
-                bookingSettings.every(
-                  (s) =>
-                    s.bookingId !== inv.bookingId ||
-                    !s.excludeFromApplication ||
-                    s.regulationRunId !== run.id,
-                ),
-              );
-              return exampleInvoice ? (
-                <article className="letter">
-                  <div className="letter-from">
-                    <div>From</div>
-                    <div style={{ marginTop: '1rem' }}>
-                      <div>{building.name}</div>
-                      <div>{building.address}</div>
-                    </div>
-                  </div>
-                  <div className="letter-to">
-                    <div>To</div>
-                    <div style={{ marginTop: '1rem' }}>
-                      <div>{exampleInvoice.tenantName}</div>
-                      <div>{exampleInvoice.unitName}</div>
-                      <div>{building.address}</div>
-                    </div>
-                  </div>
-                  <div className="letter-date">Date: {formatDate(run.notificationDate)}</div>
-                  <div className="letter-subject">RE: Notice of Rent Increase</div>
-                  <div className="letter-salutation">Dear {exampleInvoice.tenantName},</div>
-                  <div className="letter-body">
-                    <p>
-                      We hope this letter finds you well. As per the terms of your current lease agreement, we are providing you with a formal notice of a rent increase for your rental property located at: {exampleInvoice.unitName}, {building.address}.
-                    </p>
-                    <p>
-                      Effective {formatDate(run.adjustmentStartDate)}, your monthly rent will increase from{' '}
-                      <strong>
-                        {exampleInvoice.oldMonthlyRent.toLocaleString('da-DK')} kr
-                      </strong>{' '}
-                      to{' '}
-                      <strong>
-                        {exampleInvoice.newMonthlyRent.toLocaleString('da-DK')} kr
-                      </strong>
-                      . This adjustment is in line with the current market rates and the provisions outlined in your lease agreement.
-                    </p>
-                    {run.retroactiveEnabled && exampleInvoice.retroactiveAmount > 0 && (
-                      <p>
-                        In addition, there will be a one-time adjustment for the period{' '}
-                        <strong>{formatDate(run.retroFrom)}</strong> to{' '}
-                        <strong>{formatDate(run.retroTo)}</strong> in the amount of{' '}
-                        <strong>{exampleInvoice.retroactiveAmount.toFixed(0)} kr</strong>.
-                      </p>
-                    )}
-                    <p>
-                      Please ensure that your future rent payments reflect this change. If you have any questions or concerns regarding this rent increase, please feel free to contact us. We are open to discussing any issues you may have and working together to find a mutually agreeable solution.
-                    </p>
-                    <p>
-                      We value you as a tenant and appreciate your understanding in this matter. Thank you for your continued residency and for being a part of our rental community.
-                    </p>
-                  </div>
-                  <div className="letter-closing">Sincerely,</div>
-                  <div className="letter-signature">
-                    <div style={{ marginTop: '2rem', marginBottom: '0.5rem' }}></div>
-                    <div>(Landlord Signature)</div>
-                  </div>
-                  {charges.filter((c) => c.buildingId === building.id).some((c) => {
-                    const yearPrev =
-                      c.prevPeriodFrom &&
-                      c.prevPeriodFrom.length >= 4
-                        ? Number(c.prevPeriodFrom.slice(0, 4))
-                        : NaN;
-                    const yearNext =
-                      c.nextPeriodFrom &&
-                      c.nextPeriodFrom.length >= 4
-                        ? Number(c.nextPeriodFrom.slice(0, 4))
-                        : NaN;
-                    const maxYear = Math.max(
-                      Number.isFinite(yearPrev) ? yearPrev : -Infinity,
-                      Number.isFinite(yearNext) ? yearNext : -Infinity,
-                    );
-                    return (
-                      (Number.isFinite(yearPrev) &&
-                        yearPrev === maxYear &&
-                        c.prevDocumentName) ||
-                      (Number.isFinite(yearNext) &&
-                        yearNext === maxYear &&
-                        c.nextDocumentName)
-                    );
-                  }) && (
-                    <div className="letter-body" style={{ marginTop: '1rem' }}>
-                      <p>
-                        <strong>Attachments:</strong>{' '}
-                        {charges
-                          .filter((c) => c.buildingId === building.id)
-                          .flatMap((c) => {
-                            const items: string[] = [];
-                            const yearPrev =
-                              c.prevPeriodFrom &&
-                              c.prevPeriodFrom.length >= 4
-                                ? Number(c.prevPeriodFrom.slice(0, 4))
-                                : NaN;
-                            const yearNext =
-                              c.nextPeriodFrom &&
-                              c.nextPeriodFrom.length >= 4
-                                ? Number(c.nextPeriodFrom.slice(0, 4))
-                                : NaN;
-                            const maxYear = Math.max(
-                              Number.isFinite(yearPrev) ? yearPrev : -Infinity,
-                              Number.isFinite(yearNext) ? yearNext : -Infinity,
-                            );
-                            if (
-                              Number.isFinite(yearPrev) &&
-                              yearPrev === maxYear &&
-                              c.prevDocumentName
-                            ) {
-                              items.push(`${c.label} (${c.prevDocumentName})`);
-                            }
-                            if (
-                              Number.isFinite(yearNext) &&
-                              yearNext === maxYear &&
-                              c.nextDocumentName
-                            ) {
-                              items.push(`${c.label} (${c.nextDocumentName})`);
-                            }
-                            return items;
-                          })
-                          .join(', ')}
-                      </p>
-                    </div>
-                  )}
-                </article>
-              ) : null;
-            })()}
-          </section>
-        )}
-
-        {activeTab === 'templates' && (
-          <section>
-            <p className="hint">
-              Updated rent costs will be used as a base rent for future bookings.
-            </p>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Unit</th>
-                  <th className="num">Area (SQM)</th>
-                  <th className="num">Current rent cost</th>
-                  <th className="num">Adjustment amount</th>
-                  <th className="num">Suggested new rent cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {units
-                  .filter((u) => u.buildingId === building.id)
-                  .filter(
-                    (u) =>
-                      !unitSettings.some(
-                        (s) =>
-                          s.unitId === u.id &&
-                          s.regulationRunId === run.id &&
-                          s.excludeFromCalculation,
-                      ),
-                  )
-                  .map((unit) => {
-                    const monthlyAdjustment =
-                      (recomputedRun.adjustmentPerSqm * unit.areaSqm) / 12;
-                    const newTemplate = unit.baseMonthlyRent + monthlyAdjustment;
-                    const suggested =
-                      templateOverrides[unit.id] ?? Math.round(newTemplate);
-                    return (
-                      <tr key={unit.id}>
-                        <td>{unit.name}</td>
-                        <td className="num">{unit.areaSqm}</td>
-                        <td className="num">
-                          {unit.baseMonthlyRent.toLocaleString('da-DK')} kr
-                        </td>
-                        <td className="num">
-                          {(suggested - unit.baseMonthlyRent).toFixed(0)} kr
-                        </td>
-                        <td className="num">
-                          <input
-                            type="number"
-                            className="inline-input"
-                            value={suggested}
-                            disabled={isApplyingCostChanges || costLocked}
-                            onChange={(e) =>
-                              setTemplateOverrides((prev) => ({
-                                ...prev,
-                                [unit.id]: Number(e.target.value) || 0,
-                              }))
-                            }
-                          />{' '}
-                          kr
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-            <button
-              className={`primary-btn${showCostSuccess ? ' success' : ''}`}
-              onClick={handleApplyCostChanges}
-              disabled={isApplyingCostChanges || costLocked}
+        {showNotificationLetterModal && (
+          <div
+            className="dialog-backdrop"
+            onClick={(e) => e.target === e.currentTarget && setShowNotificationLetterModal(false)}
+          >
+            <div
+              className="dialog"
+              style={{ maxWidth: '90vw', maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
             >
-              {isApplyingCostChanges
-                ? 'Applying rent cost changes…'
-                : costLocked
-                ? '✓ Rent cost changes applied'
-                : 'Apply rent cost changes'}
-            </button>
-          </section>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '1rem',
+                  flexShrink: 0,
+                }}
+              >
+                <h3 style={{ margin: 0 }}>Notification letter example</h3>
+                <button
+                  className="text-button"
+                  onClick={() => setShowNotificationLetterModal(false)}
+                  style={{ fontSize: '1.25rem', lineHeight: 1, color: 'var(--color-text-primary)' }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '1.25rem' }}>close</span>
+                </button>
+              </div>
+              <p className="hint" style={{ margin: '0 0 1rem', flexShrink: 0 }}>
+                You are previewing a single example of the tenant notification
+                letter. Each tenant will receive their individual notification on{' '}
+                {formatDate(run.notificationDate)}. Tenants excluded from application
+                will not receive any notification letter.
+              </p>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                {(() => {
+                  const exampleInvoice = invoicePreviews.find((inv) =>
+                    bookingSettings.every(
+                      (s) =>
+                        s.bookingId !== inv.bookingId ||
+                        !s.excludeFromApplication ||
+                        s.regulationRunId !== run.id,
+                    ),
+                  );
+                  return exampleInvoice ? (
+                    <article className="letter">
+                      <div className="letter-from">
+                        <div>From</div>
+                        <div style={{ marginTop: '1rem' }}>
+                          <div>{building.name}</div>
+                          <div>{building.address}</div>
+                        </div>
+                      </div>
+                      <div className="letter-to">
+                        <div>To</div>
+                        <div style={{ marginTop: '1rem' }}>
+                          <div>{exampleInvoice.tenantName}</div>
+                          <div>{exampleInvoice.unitName}</div>
+                          <div>{building.address}</div>
+                        </div>
+                      </div>
+                      <div className="letter-date">Date: {formatDate(run.notificationDate)}</div>
+                      <div className="letter-subject">RE: Notice of Rent Increase</div>
+                      <div className="letter-salutation">Dear {exampleInvoice.tenantName},</div>
+                      <div className="letter-body">
+                        <p>
+                          We hope this letter finds you well. As per the terms of your current lease agreement, we are providing you with a formal notice of a rent increase for your rental property located at: {exampleInvoice.unitName}, {building.address}.
+                        </p>
+                        <p>
+                          Effective {formatDate(run.adjustmentStartDate)}, your monthly rent will increase from{' '}
+                          <strong>
+                            {exampleInvoice.oldMonthlyRent.toLocaleString('da-DK')} kr
+                          </strong>{' '}
+                          to{' '}
+                          <strong>
+                            {exampleInvoice.newMonthlyRent.toLocaleString('da-DK')} kr
+                          </strong>
+                          . This adjustment is in line with the current market rates and the provisions outlined in your lease agreement.
+                        </p>
+                        {run.retroactiveEnabled && exampleInvoice.retroactiveAmount > 0 && (
+                          <p>
+                            In addition, there will be a one-time adjustment for the period{' '}
+                            <strong>{formatDate(run.retroFrom)}</strong> to{' '}
+                            <strong>{formatDate(run.retroTo)}</strong> in the amount of{' '}
+                            <strong>{exampleInvoice.retroactiveAmount.toFixed(0)} kr</strong>.
+                          </p>
+                        )}
+                        <p>
+                          Please ensure that your future rent payments reflect this change. If you have any questions or concerns regarding this rent increase, please feel free to contact us. We are open to discussing any issues you may have and working together to find a mutually agreeable solution.
+                        </p>
+                        <p>
+                          We value you as a tenant and appreciate your understanding in this matter. Thank you for your continued residency and for being a part of our rental community.
+                        </p>
+                      </div>
+                      <div className="letter-closing">Sincerely,</div>
+                      <div className="letter-signature">
+                        <div style={{ marginTop: '2rem', marginBottom: '0.5rem' }}></div>
+                        <div>(Landlord Signature)</div>
+                      </div>
+                      {charges.filter((c) => c.buildingId === building.id).some((c) => {
+                        const yearPrev =
+                          c.prevPeriodFrom &&
+                          c.prevPeriodFrom.length >= 4
+                            ? Number(c.prevPeriodFrom.slice(0, 4))
+                            : NaN;
+                        const yearNext =
+                          c.nextPeriodFrom &&
+                          c.nextPeriodFrom.length >= 4
+                            ? Number(c.nextPeriodFrom.slice(0, 4))
+                            : NaN;
+                        const maxYear = Math.max(
+                          Number.isFinite(yearPrev) ? yearPrev : -Infinity,
+                          Number.isFinite(yearNext) ? yearNext : -Infinity,
+                        );
+                        return (
+                          (Number.isFinite(yearPrev) &&
+                            yearPrev === maxYear &&
+                            c.prevDocumentName) ||
+                          (Number.isFinite(yearNext) &&
+                            yearNext === maxYear &&
+                            c.nextDocumentName)
+                        );
+                      }) && (
+                        <div className="letter-body" style={{ marginTop: '1rem' }}>
+                          <p>
+                            <strong>Attachments:</strong>{' '}
+                            {charges
+                              .filter((c) => c.buildingId === building.id)
+                              .flatMap((c) => {
+                                const items: string[] = [];
+                                const yearPrev =
+                                  c.prevPeriodFrom &&
+                                  c.prevPeriodFrom.length >= 4
+                                    ? Number(c.prevPeriodFrom.slice(0, 4))
+                                    : NaN;
+                                const yearNext =
+                                  c.nextPeriodFrom &&
+                                  c.nextPeriodFrom.length >= 4
+                                    ? Number(c.nextPeriodFrom.slice(0, 4))
+                                    : NaN;
+                                const maxYear = Math.max(
+                                  Number.isFinite(yearPrev) ? yearPrev : -Infinity,
+                                  Number.isFinite(yearNext) ? yearNext : -Infinity,
+                                );
+                                if (
+                                  Number.isFinite(yearPrev) &&
+                                  yearPrev === maxYear &&
+                                  c.prevDocumentName
+                                ) {
+                                  items.push(`${c.label} (${c.prevDocumentName})`);
+                                }
+                                if (
+                                  Number.isFinite(yearNext) &&
+                                  yearNext === maxYear &&
+                                  c.nextDocumentName
+                                ) {
+                                  items.push(`${c.label} (${c.nextDocumentName})`);
+                                }
+                                return items;
+                              })
+                              .join(', ')}
+                          </p>
+                        </div>
+                      )}
+                    </article>
+                  ) : (
+                    <p className="hint">No included bookings to show an example.</p>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
         )}
 
         {showExclusionPopover && (
