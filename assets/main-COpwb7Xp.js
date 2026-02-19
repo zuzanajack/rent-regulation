@@ -1,0 +1,1 @@
+import{j as e,A as r,c as t,a,r as s,T as n}from"./App-lIy4rQXq.js";function o(){return e.jsx(r,{variant:"a"})}const c=t({palette:{primary:{main:"#cf6c33",dark:"#BE642F"}}});a.createRoot(document.getElementById("root")).render(e.jsx(s.StrictMode,{children:e.jsx(n,{theme:c,children:e.jsx(o,{})})}));
