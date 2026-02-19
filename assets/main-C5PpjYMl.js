@@ -1,0 +1,1 @@
+import{j as e,A as t,c as r,a,r as n,T as s}from"./App-CUYBj1HT.js";function o(){return e.jsx(t,{navigationVariant:"tabs"})}const i=r({palette:{primary:{main:"#cf6c33",dark:"#BE642F"}}});a.createRoot(document.getElementById("root")).render(e.jsx(n.StrictMode,{children:e.jsx(s,{theme:i,children:e.jsx(o,{})})}));
