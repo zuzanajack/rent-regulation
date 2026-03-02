@@ -1,1 +1,0 @@
-import{j as e,A as r,c as t,a,r as s,T as c}from"./App-BrxQ0w12.js";function n(){return e.jsx(r,{variant:"c"})}const o=t({palette:{primary:{main:"#cf6c33",dark:"#BE642F"}}});a.createRoot(document.getElementById("root")).render(e.jsx(s.StrictMode,{children:e.jsx(c,{theme:o,children:e.jsx(n,{})})}));
